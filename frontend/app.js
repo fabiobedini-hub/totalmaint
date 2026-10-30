@@ -3,10 +3,21 @@
 "use strict";
 
 // ---------------------------------------------------------------- state & helpers
+// Languages: Norwegian, English, Italian. Unknown or missing → the browser's language, else English.
+const LANG_OPTIONS = [["no", "Norsk"], ["en", "English"], ["it", "Italiano"]];
+function pickLang() {
+  let saved = null;
+  try { saved = localStorage.getItem("tm_lang"); } catch { /* storage off */ }
+  if (LANG_OPTIONS.some(([k]) => k === saved)) return saved;
+  const nav = navigator.language || "";
+  return /^(nb|nn|no)/i.test(nav) ? "no" : /^it/i.test(nav) ? "it" : "en";
+}
+const langSwitch = () => `<div class="lang-switch">${LANG_OPTIONS.map(([k, label]) =>
+  `<button class="btn small ${state.lang === k ? "primary" : ""}" data-lang="${k}">${label}</button>`).join("\n      ")}</div>`;
 const state = {
   token: localStorage.getItem("tm_token"),
   user: null,
-  lang: localStorage.getItem("tm_lang") || (/^(nb|nn|no)/i.test(navigator.language) ? "no" : "en"),
+  lang: pickLang(),
   users: [],
   vendors: [],
   mine: localStorage.getItem("tm_mine") === "1",
@@ -22,7 +33,7 @@ const T = (key, ...args) => {
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
-const locale = () => (state.lang === "no" ? "nb-NO" : "en-GB");
+const locale = () => ({ no: "nb-NO", it: "it-IT" }[state.lang] || "en-GB");
 const todayIso = () => new Date().toLocaleDateString("sv-SE");
 const daysFromToday = (iso) => Math.round((Date.parse(iso) - Date.parse(todayIso())) / 864e5);
 const fmtDate = (iso) => (iso ? new Date(iso + "T12:00:00").toLocaleDateString(locale(), { day: "numeric", month: "short", year: "numeric" }) : "");
@@ -453,8 +464,7 @@ async function renderAuth(mode) {
       ${mode === "login" && status.signup_enabled ? `<p class="small" style="text-align:center;margin:8px 0 0"><button class="link" id="toSignup">${esc(T("signup_link"))}</button></p>` : ""}
       ${mode === "signup" ? `<p class="small" style="text-align:center;margin:14px 0 0"><button class="link" id="toLogin">${esc(T("have_account"))}</button></p>` : ""}
     </div>
-    <div class="lang-switch"><button class="btn small ${state.lang === "no" ? "primary" : ""}" data-lang="no">Norsk</button>
-      <button class="btn small ${state.lang === "en" ? "primary" : ""}" data-lang="en">English</button></div>
+    ${langSwitch()}
   </div></div>`;
   $$("[data-lang]", app).forEach((b) => b.onclick = () => { setLang(b.dataset.lang); renderAuth(mode); });
   $("#toSignup")?.addEventListener("click", () => renderAuth("signup"));
@@ -478,8 +488,7 @@ function authFrame(inner, onLang) {
   app.innerHTML = `<div class="auth-wrap"><div class="auth">
     <div class="brand"><img src="icon.svg" alt=""><span>${T("app")}</span></div>
     <div class="panel">${inner}</div>
-    <div class="lang-switch"><button class="btn small ${state.lang === "no" ? "primary" : ""}" data-lang="no">Norsk</button>
-      <button class="btn small ${state.lang === "en" ? "primary" : ""}" data-lang="en">English</button></div>
+    ${langSwitch()}
   </div></div>`;
   $$("[data-lang]", app).forEach((b) => b.onclick = () => { setLang(b.dataset.lang); onLang(); });
   return app;
@@ -561,8 +570,7 @@ async function renderInvite(token) {
       <p class="small muted">${esc(info.email)}${info.has_account ? ` · ${esc(T("invite_has_account"))}` : ""}</p>
       <form id="invform">${formHtml(fields)}<button class="btn primary" style="width:100%">${esc(T("join_group"))}</button></form>
     </div>
-    <div class="lang-switch"><button class="btn small ${state.lang === "no" ? "primary" : ""}" data-lang="no">Norsk</button>
-      <button class="btn small ${state.lang === "en" ? "primary" : ""}" data-lang="en">English</button></div>
+    ${langSwitch()}
   </div></div>`;
   $$("[data-lang]", app).forEach((b) => b.onclick = () => { setLang(b.dataset.lang); renderInvite(token); });
   $("#invform").onsubmit = async (e) => {
@@ -580,7 +588,7 @@ async function renderInvite(token) {
 function setLang(lang) {
   state.lang = lang;
   localStorage.setItem("tm_lang", lang);
-  document.documentElement.lang = lang === "no" ? "nb" : "en";
+  document.documentElement.lang = lang === "no" ? "nb" : lang;
 }
 
 // ---------------------------------------------------------------- shell
@@ -1568,7 +1576,7 @@ async function pageSettings(main) {
   state.users = users;
   const profileFields = [
     { name: "name", label: T("name"), required: true },
-    { name: "lang", label: T("language"), type: "select", options: [["no", "Norsk"], ["en", "English"]] },
+    { name: "lang", label: T("language"), type: "select", options: LANG_OPTIONS },
     { name: "password", label: T("new_password"), type: "password", autocomplete: "new-password" },
     { name: "email_reminders", label: T("email_reminders"), type: "checkbox" },
   ];
@@ -1653,7 +1661,7 @@ async function pageSettings(main) {
     ...(isNew ? [{ name: "email", label: T("email"), type: "email", required: true }] : []),
     { name: "role_id", label: T("role"), type: "select", numeric: true, options: roleOptions(x?.role_id) },
     { name: "password", label: isNew ? T("password") : T("new_password"), type: "password", required: isNew, autocomplete: "new-password" },
-    { name: "lang", label: T("language"), type: "select", options: [["no", "Norsk"], ["en", "English"]] },
+    { name: "lang", label: T("language"), type: "select", options: LANG_OPTIONS },
   ];
   $("#addUser")?.addEventListener("click", () => openForm({
     title: T("add_user"), fields: userFields(true), values: { lang: state.lang, role_id: defaultRole },
@@ -1737,7 +1745,7 @@ function inviteDialog(roles, defaultRole) {
   const fields = [
     { name: "email", label: T("email"), type: "email", required: true },
     { name: "role_id", label: T("role"), type: "select", numeric: true, options: roles.filter((r) => !r.locked).map((r) => [r.id, r.name]) },
-    { name: "lang", label: T("invite_language"), type: "select", options: [["no", "Norsk"], ["en", "English"]] },
+    { name: "lang", label: T("invite_language"), type: "select", options: LANG_OPTIONS },
   ];
   openForm({
     title: T("invite"), fields, values: { role_id: defaultRole, lang: state.lang }, submitLabel: T("send_invite"),

@@ -81,4 +81,4 @@ ADMIN_DIR = Path(os.getenv("ADMIN_DIR", PROJECT_DIR / "admin"))
 BACKUP_DIR = Path(os.getenv("BACKUP_DIR", PROJECT_DIR / "backup"))
 # Where Adminer (raw database tool) answers; empty = same host as the console, port 8082
 ADMINER_URL = os.getenv("ADMINER_URL", "")
-APP_VERSION = "0.4.1"
+APP_VERSION = "0.5.0"

@@ -4,7 +4,7 @@ from datetime import date
 import pytest
 
 from app.schemas import AssetKind
-from app.templates_data import TEMPLATES
+from app.templates_data import TEMPLATES, TASK_TITLES_IT
 
 KINDS = list(AssetKind.__args__)
 
@@ -32,10 +32,12 @@ def test_template_tasks_are_well_formed():
     units = {"days", "weeks", "months", "years"}
     for kind, bundles in TEMPLATES.items():
         for b in bundles:
-            assert b["name"]["en"] and b["name"]["no"]
+            assert b["name"]["en"] and b["name"]["no"] and b["name"]["it"]
+            assert all(c["it"] for c in b["components"].values()), kind
             for task in b["tasks"]:
                 en, no, value, unit, comp, *season = task
                 assert en and no and value > 0 and unit in units, (kind, task)
+                assert en in TASK_TITLES_IT, ("missing Italian title", en)
                 assert comp is None or comp in b["components"], (kind, task)
                 if season:
                     month, day = map(int, season[0].split("-"))
@@ -66,6 +68,18 @@ def test_templates_in_norwegian(api, client):
     titles = {t["title"] for t in api.get(f"/api/assets/{a['id']}")["tasks"]}
     assert "Sjekk dekktrykk" in titles
     assert me["lang"] == "en"
+
+
+def test_templates_in_italian(api):
+    api.patch("/api/me", {"lang": "it"})
+    names = {t["name"] for t in api.get("/api/templates?kind=car")}
+    assert "Auto elettrica" in names
+    a = api.asset("Panda", "car")
+    api.post(f"/api/assets/{a['id']}/apply-template?key=car_ev", {})
+    detail = api.get(f"/api/assets/{a['id']}")
+    titles = {t["title"] for t in detail["tasks"]}
+    assert "Monta le gomme invernali" in titles and "Tagliando annuale" in titles
+    assert "Pneumatici" in {c["name"] for c in detail["components"]}
 
 
 def test_unknown_template(api):

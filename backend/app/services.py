@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from . import models as m
 from . import schemas as s
+from .lang import pick
 from .recurrence import add_interval, counter_status, worst_status
 
 
@@ -35,15 +36,15 @@ def task_status(task: m.Task, today: date | None = None) -> str:
     return worst_status(by_date, by_counter) or "none"
 
 
-def counter_text(task: m.Task, no: bool) -> str:
+def counter_text(task: m.Task, lang: str) -> str:
     """Short text for e-mails: 'at 1200 h (now 1150 h)'."""
-    unit = {"km": "km", "hours": "t" if no else "h"}.get(task.asset.counter_unit, "")
+    unit = {"km": "km", "hours": pick(lang, "h", "t", "h")}.get(task.asset.counter_unit, "")
     nxt, cur = task.counter_next_due, task.asset.counter_value
     if nxt is None:
         return ""
-    txt = f"{'ved' if no else 'at'} {nxt:,.0f} {unit}".replace(",", " ")
+    txt = f"{pick(lang, 'at', 'ved', 'a')} {nxt:,.0f} {unit}".replace(",", " ")
     if cur is not None:
-        txt += f" ({'nå' if no else 'now'} {cur:,.0f} {unit})".replace(",", " ")
+        txt += f" ({pick(lang, 'now', 'nå', 'ora')} {cur:,.0f} {unit})".replace(",", " ")
     return txt
 
 

@@ -294,3 +294,14 @@ def test_user_without_group_is_refused(client, path):
                       ical_token=new_ical_token()))
         db.commit()
     assert login(client, "lost@test.no").c.get(path, headers=login(client, "lost@test.no").h).status_code == 403
+
+
+def test_italian_user_gets_italian_roles_and_messages(client):
+    r = client.post("/api/auth/setup", json={"name": "Fabio", "email": "it@test.no", "password": "secret123", "lang": "it"})
+    assert r.status_code == 200, r.text
+    h = {"Authorization": f"Bearer {r.json()['token']}"}
+    roles = {x["key"]: x["name"] for x in client.get("/api/roles", headers=h).json()}
+    assert roles == {"owner": "Proprietario", "admin": "Amministratore", "creator": "Collaboratore", "viewer": "Lettore"}
+    labels = {x["key"]: x["label"] for x in client.get("/api/permissions", headers=h).json()}
+    assert labels["tasks.create"] == "Creare attività"
+    assert client.get("/api/me", headers=h).json()["lang"] == "it"

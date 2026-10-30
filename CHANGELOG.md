@@ -2,6 +2,13 @@
 
 Una riga per ogni modifica pubblicata. La più recente in alto.
 
+## 0.5.0 – 2026-10-30
+- **TotalMaint in italiano**: oltre a norvegese e inglese. Si sceglie con Norsk · English · Italiano nella pagina di accesso, oppure in Impostazioni → Lingua. Al primo avvio segue la lingua del browser.
+- In italiano anche le **e-mail** (promemoria, inviti, password dimenticata, e-mail di prova), il nome del calendario abbonato e la scritta "Fine garanzia".
+- **Modelli di attività** in italiano: casa, pompa di calore, ventilazione, giardino, auto, barca, baita, bici, moto e monopattino.
+- I ruoli delle nuove famiglie create in italiano si chiamano Proprietario, Amministratore, Collaboratore e Lettore. Le famiglie esistenti tengono i nomi che hanno (si possono rinominare).
+- Nuovo `backend/app/lang.py` con le tre lingue in un posto solo; test per modelli e ruoli in italiano.
+
 ## 0.4.1 – 2026-10-30
 - **TotalMant Admin in tre lingue**: italiano, inglese e norvegese. Si sceglie con IT · EN · NO nella pagina di accesso e in fondo al menu; la scelta resta salvata nel browser. Al primo avvio segue la lingua del browser.
 - Anche i messaggi di errore del server (password sbagliata, sessione scaduta …) vengono mostrati nella lingua scelta. Il testo degli eventi nel registro resta quello salvato dal server (inglese).

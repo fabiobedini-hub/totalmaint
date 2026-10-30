@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from . import models as m
+from .lang import pick
 from .config import PUBLIC_URL
 from .db import get_db
 from .services import calendar_events
@@ -43,7 +44,7 @@ def ical_feed(token: str, db: Session = Depends(get_db)):
     user = db.scalar(select(m.User).where(m.User.ical_token == token))
     if user is None:
         raise HTTPException(404, "Unknown calendar")
-    no = user.lang == "no"
+    lang = user.lang
     today = date.today()
     group_ids = list(db.scalars(select(m.Membership.group_id).where(m.Membership.user_id == user.id)))
     events = calendar_events(db, today - timedelta(days=60), today + timedelta(days=365), user.id,
@@ -52,7 +53,7 @@ def ical_feed(token: str, db: Session = Depends(get_db)):
 
     lines = [
         "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//TotalMaint//EN", "CALSCALE:GREGORIAN",
-        "METHOD:PUBLISH", f"X-WR-CALNAME:{'Vedlikehold' if no else 'Maintenance'}",
+        "METHOD:PUBLISH", f"X-WR-CALNAME:{pick(lang, 'Maintenance', 'Vedlikehold', 'Manutenzione')}",
         "REFRESH-INTERVAL;VALUE=DURATION:PT6H", "X-PUBLISHED-TTL:PT6H",
     ]
     for e in events:
@@ -60,7 +61,7 @@ def ical_feed(token: str, db: Session = Depends(get_db)):
             continue
         d = date.fromisoformat(e["date"])
         if e["type"] == "warranty":
-            summary = f"{'Garanti utløper' if no else 'Warranty ends'}: {e['title']} ({e['asset']})"
+            summary = f"{pick(lang, 'Warranty ends', 'Garanti utløper', 'Fine garanzia')}: {e['title']} ({e['asset']})"
             url = f"{PUBLIC_URL}/#/asset/{e['asset_id']}"
         else:
             summary = f"{e['title']} – {e['asset']}"

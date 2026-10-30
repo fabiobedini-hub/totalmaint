@@ -22,6 +22,7 @@ from .permissions import Ctx, require
 from .config import (PUBLIC_URL, REMINDER_HOUR, SMTP_FROM, SMTP_HOST, SMTP_PASSWORD, SMTP_PORT,
                      SMTP_USER)
 from .db import SessionLocal, get_db
+from .lang import pick
 from .services import counter_text, task_status
 
 log = logging.getLogger("totalmaint.reminders")
@@ -49,7 +50,7 @@ def collect(db: Session, group_id: int | None = None) -> dict[int, list[m.Task]]
 
 
 def _compose(user: m.User, tasks: list[m.Task]) -> EmailMessage:
-    no = user.lang == "no"
+    lang = user.lang
     today = date.today()
     lines = []
     for t in tasks:
@@ -57,23 +58,24 @@ def _compose(user: m.User, tasks: list[m.Task]) -> EmailMessage:
         if t.next_due is not None:
             days = (t.next_due - today).days
             if days < 0:
-                when = f"{-days} dager over frist" if no else f"{-days} days overdue"
+                when = pick(lang, f"{-days} days overdue", f"{-days} dager over frist", f"{-days} giorni di ritardo")
             elif days == 0:
-                when = "i dag" if no else "today"
+                when = pick(lang, "today", "i dag", "oggi")
             else:
-                when = f"om {days} dager" if no else f"in {days} days"
+                when = pick(lang, f"in {days} days", f"om {days} dager", f"tra {days} giorni")
             parts.append(f"{t.next_due:%d.%m.%Y}, {when}")
-        ctext = counter_text(t, no) if t.counter_interval else ""
+        ctext = counter_text(t, lang) if t.counter_interval else ""
         if ctext:
             parts.append(ctext)
         lines.append(f"• {t.title} – {t.asset.name}" + (f" ({'; '.join(parts)})" if parts else ""))
     msg = EmailMessage()
-    msg["Subject"] = (f"Vedlikehold: {len(tasks)} oppgave(r) venter" if no
-                      else f"Maintenance: {len(tasks)} task(s) need attention")
+    msg["Subject"] = pick(lang, f"Maintenance: {len(tasks)} task(s) need attention",
+                          f"Vedlikehold: {len(tasks)} oppgave(r) venter",
+                          f"Manutenzione: {len(tasks)} attività da fare")
     msg["From"] = SMTP_FROM or SMTP_USER
     msg["To"] = user.email
-    greeting = f"Hei {user.name}," if no else f"Hi {user.name},"
-    footer = "Åpne appen" if no else "Open the app"
+    greeting = pick(lang, f"Hi {user.name},", f"Hei {user.name},", f"Ciao {user.name},")
+    footer = pick(lang, "Open the app", "Åpne appen", "Apri l'app")
     msg.set_content(f"{greeting}\n\n" + "\n".join(lines) + f"\n\n{footer}: {PUBLIC_URL}\n")
     return msg
 
@@ -132,12 +134,17 @@ def send_password_reset(user: m.User, link: str, hours: int, lang: str | None = 
     """E-mail a "forgot password" link. Returns (sent, error)."""
     if not SMTP_HOST:
         return False, "SMTP_HOST is not set in .env"
-    no = (lang or user.lang) == "no"
+    lang = lang or user.lang
     msg = EmailMessage()
-    msg["Subject"] = "TotalMaint: nytt passord" if no else "TotalMaint: reset your password"
+    msg["Subject"] = pick(lang, "TotalMaint: reset your password", "TotalMaint: nytt passord", "TotalMaint: nuova password")
     msg["From"] = SMTP_FROM or SMTP_USER
     msg["To"] = user.email
-    if no:
+    if lang == "it":
+        body = (f"Ciao {user.name},\n\nQualcuno (speriamo tu) ha chiesto di cambiare la password di TotalMaint.\n\n"
+                f"Apri questo link per scegliere una nuova password:\n{link}\n\n"
+                f"Il link funziona una volta, per {hours} ore. Se non l'hai chiesto tu, ignora questa e-mail: "
+                f"la tua password non è cambiata.\n")
+    elif lang == "no":
         body = (f"Hei {user.name},\n\nNoen (forhåpentligvis du) ba om å lage nytt passord i TotalMaint.\n\n"
                 f"Åpne lenken for å velge et nytt passord:\n{link}\n\n"
                 f"Lenken virker én gang i {hours} timer. Ba du ikke om dette, kan du se bort fra e-posten; "
@@ -160,15 +167,19 @@ def send_invitation(inv: m.Invitation, lang: str) -> tuple[bool, str | None]:
     """E-mail the invitation link. Returns (sent, error). Without SMTP the link is only shown in the app."""
     if not SMTP_HOST:
         return False, "SMTP_HOST is not set in .env: copy the link and send it yourself"
-    no = lang == "no"
     who = inv.invited_by.name if inv.invited_by else "TotalMaint"
     link = f"{PUBLIC_URL}/#/invite/{inv.token}"
     msg = EmailMessage()
-    msg["Subject"] = (f"{who} inviterer deg til «{inv.group.name}» i TotalMaint" if no
-                      else f"{who} invited you to \"{inv.group.name}\" on TotalMaint")
+    msg["Subject"] = pick(lang, f"{who} invited you to \"{inv.group.name}\" on TotalMaint",
+                          f"{who} inviterer deg til «{inv.group.name}» i TotalMaint",
+                          f"{who} ti ha invitato in «{inv.group.name}» su TotalMaint")
     msg["From"] = SMTP_FROM or SMTP_USER
     msg["To"] = inv.email
-    if no:
+    if lang == "it":
+        body = (f"Ciao,\n\n{who} ti ha invitato in «{inv.group.name}» su TotalMaint, "
+                f"con il ruolo {inv.role.name}.\n\nApri questo link per entrare:\n{link}\n\n"
+                f"Il link funziona una volta e scade il {inv.expires_at:%d/%m/%Y}.\n")
+    elif lang == "no":
         body = (f"Hei,\n\n{who} har invitert deg til «{inv.group.name}» i TotalMaint, "
                 f"med rollen {inv.role.name}.\n\nÅpne lenken for å bli med:\n{link}\n\n"
                 f"Lenken virker én gang og går ut {inv.expires_at:%d.%m.%Y}.\n")
@@ -218,7 +229,8 @@ def send_test(user: m.User = Depends(admin_user)):
     msg["Subject"] = "TotalMaint: test"
     msg["From"] = SMTP_FROM or SMTP_USER
     msg["To"] = user.email
-    msg.set_content("E-mail from TotalMaint works." if user.lang != "no" else "E-post fra TotalMaint virker.")
+    msg.set_content(pick(user.lang, "E-mail from TotalMaint works.", "E-post fra TotalMaint virker.",
+                         "Le e-mail di TotalMaint funzionano."))
     try:
         send_mail(msg)
         return {"ok": True, "to": user.email}

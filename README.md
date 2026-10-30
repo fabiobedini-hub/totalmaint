@@ -77,7 +77,7 @@ solved on the NAS with Tailscale or the reverse proxy (see below).
   home network and Tailscale only, its own `ADMIN_PASSWORD`): dashboard, families, users
   (password link, block, delete), invitations, e-mail log, sign-up settings, backups, database.
   Locally: `run_admin.bat` → <http://localhost:8001>. Code: `backend/app/admin_main.py` + `admin/`.
-* **Multiple users** with their own language (English / Norwegian) and "only my tasks".
+* **Multiple users** with their own language (Norwegian / English / Italian) and "only my tasks".
 * **E-mail reminders** once a day (configure SMTP in `.env`; without it they are only logged).
 
 ## 3. Moving it to the Synology DS723+

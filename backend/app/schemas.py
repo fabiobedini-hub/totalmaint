@@ -7,7 +7,7 @@ IntervalUnit = Literal["none", "days", "weeks", "months", "years"]
 AssetKind = Literal["home", "car", "boat", "cabin", "bicycle", "motorcycle", "scooter", "other"]
 CounterUnit = Literal["none", "km", "hours"]
 VendorStatus = Literal["none", "requested", "confirmed"]
-Lang = Literal["en", "no"]
+Lang = Literal["en", "no", "it"]
 
 
 class ORM(BaseModel):

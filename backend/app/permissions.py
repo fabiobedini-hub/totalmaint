@@ -18,40 +18,41 @@ from sqlalchemy.orm import Session
 from . import models as m
 from .auth import current_user
 from .db import get_db
+from .lang import INDEX, default_group_name, norm, pick
 
-# key -> (English, Norwegian). The order is the order in the role editor.
-PERMISSIONS: dict[str, tuple[str, str]] = {
-    "assets.create": ("Create things", "Opprette ting"),
-    "assets.edit": ("Edit things", "Endre ting"),
-    "assets.delete": ("Delete things", "Slette ting"),
-    "components.create": ("Create components", "Opprette komponenter"),
-    "components.edit": ("Edit components", "Endre komponenter"),
-    "components.delete": ("Delete components", "Slette komponenter"),
-    "tasks.create": ("Create tasks", "Opprette oppgaver"),
-    "tasks.edit": ("Edit tasks", "Endre oppgaver"),
-    "tasks.delete": ("Delete tasks", "Slette oppgaver"),
-    "tasks.complete": ("Mark tasks as done", "Markere oppgaver som utført"),
-    "history.delete": ("Delete history and purchases", "Slette historikk og kjøp"),
-    "counters.record": ("Record km / hours", "Registrere km / timer"),
-    "parts.manage": ("Spare parts and shopping list", "Reservedeler og handleliste"),
-    "warranties.manage": ("Warranties", "Garantier"),
-    "vendors.manage": ("Vendors", "Leverandører"),
-    "attachments.add": ("Add files", "Legge til filer"),
-    "attachments.delete": ("Delete files", "Slette filer"),
-    "templates.apply": ("Use templates", "Bruke maler"),
-    "members.manage": ("Invite and manage members", "Invitere og administrere medlemmer"),
-    "roles.manage": ("Edit roles", "Endre roller"),
+# key -> (English, Norwegian, Italian). The order is the order in the role editor.
+PERMISSIONS: dict[str, tuple[str, str, str]] = {
+    "assets.create": ("Create things", "Opprette ting", "Creare oggetti"),
+    "assets.edit": ("Edit things", "Endre ting", "Modificare oggetti"),
+    "assets.delete": ("Delete things", "Slette ting", "Eliminare oggetti"),
+    "components.create": ("Create components", "Opprette komponenter", "Creare componenti"),
+    "components.edit": ("Edit components", "Endre komponenter", "Modificare componenti"),
+    "components.delete": ("Delete components", "Slette komponenter", "Eliminare componenti"),
+    "tasks.create": ("Create tasks", "Opprette oppgaver", "Creare attività"),
+    "tasks.edit": ("Edit tasks", "Endre oppgaver", "Modificare attività"),
+    "tasks.delete": ("Delete tasks", "Slette oppgaver", "Eliminare attività"),
+    "tasks.complete": ("Mark tasks as done", "Markere oppgaver som utført", "Segnare attività come fatte"),
+    "history.delete": ("Delete history and purchases", "Slette historikk og kjøp", "Eliminare storico e acquisti"),
+    "counters.record": ("Record km / hours", "Registrere km / timer", "Registrare km / ore"),
+    "parts.manage": ("Spare parts and shopping list", "Reservedeler og handleliste", "Ricambi e lista della spesa"),
+    "warranties.manage": ("Warranties", "Garantier", "Garanzie"),
+    "vendors.manage": ("Vendors", "Leverandører", "Fornitori"),
+    "attachments.add": ("Add files", "Legge til filer", "Aggiungere file"),
+    "attachments.delete": ("Delete files", "Slette filer", "Eliminare file"),
+    "templates.apply": ("Use templates", "Bruke maler", "Usare modelli"),
+    "members.manage": ("Invite and manage members", "Invitere og administrere medlemmer", "Invitare e gestire membri"),
+    "roles.manage": ("Edit roles", "Endre roller", "Modificare ruoli"),
 }
 ALL = list(PERMISSIONS)
 
-BUILTIN_ROLES: list[tuple[str, tuple[str, str], list[str]]] = [
-    ("owner", ("Owner", "Eier"), ALL),
-    ("admin", ("Admin", "Administrator"), ALL),
-    ("creator", ("Creator", "Bidragsyter"), [
+BUILTIN_ROLES: list[tuple[str, tuple[str, str, str], list[str]]] = [
+    ("owner", ("Owner", "Eier", "Proprietario"), ALL),
+    ("admin", ("Admin", "Administrator", "Amministratore"), ALL),
+    ("creator", ("Creator", "Bidragsyter", "Collaboratore"), [
         "components.create", "components.edit", "tasks.create", "tasks.edit", "tasks.complete",
         "counters.record", "parts.manage", "warranties.manage", "vendors.manage", "attachments.add",
     ]),
-    ("viewer", ("Viewer", "Leser"), []),
+    ("viewer", ("Viewer", "Leser", "Lettore"), []),
 ]
 
 
@@ -63,7 +64,7 @@ def clean(perms) -> str:
 
 def create_builtin_roles(db: Session, group: m.Group, lang: str = "en") -> dict[str, m.Role]:
     out = {}
-    i = 1 if lang == "no" else 0
+    i = INDEX[norm(lang)]
     for key, names, perms in BUILTIN_ROLES:
         role = m.Role(group_id=group.id, key=key, name=names[i], permissions=clean(perms))
         db.add(role)
@@ -101,8 +102,9 @@ class Ctx:
 
     def need(self, perm: str) -> None:
         if not self.can(perm):
-            label = PERMISSIONS.get(perm, (perm, perm))[1 if self.user.lang == "no" else 0]
-            msg = f"Din rolle har ikke lov til: {label}" if self.user.lang == "no" else f"Your role does not allow: {label}"
+            label = PERMISSIONS.get(perm, (perm, perm, perm))[INDEX[norm(self.user.lang)]]
+            msg = pick(self.user.lang, f"Your role does not allow: {label}", f"Din rolle har ikke lov til: {label}",
+                       f"Il tuo ruolo non permette: {label}")
             raise HTTPException(403, msg)
 
 
@@ -149,7 +151,7 @@ def migrate_to_groups(db: Session) -> Optional[str]:
     msg = None
     if not groups:
         owner = next((u for u in users if u.is_admin), users[0])
-        name = "Familien" if owner.lang == "no" else "Family"
+        name = default_group_name(owner.lang)
         g = new_group(db, name, owner)
         roles = {r.key: r for r in g.roles}
         for u in users:

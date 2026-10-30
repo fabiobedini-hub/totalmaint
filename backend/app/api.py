@@ -18,13 +18,14 @@ from .auth import create_token, current_user, hash_password, new_ical_token, ver
 from .config import (INVITE_DAYS, MAX_UPLOAD_MB, PUBLIC_URL, RESET_HOURS, SIGNUP_CODE, SIGNUP_ENABLED, SMTP_HOST,
                      UPLOAD_DIR)
 from .db import get_db
+from .lang import INDEX, default_group_name, norm
 from .recurrence import add_interval, next_counter_after_completion, next_due_after_completion
 from .services import (asset_total_cost, calendar_events, completion_out, part_out, task_out,
                        task_status, warranty_out)
 from .permissions import (ALL, PERMISSIONS, Ctx, clean, group_asset_ids, group_ctx, memberships_of, new_group,
                           require)
 from .reminders import send_invitation, send_password_reset
-from .templates_data import find_template, list_templates
+from .templates_data import find_template, list_templates, task_title
 
 router = APIRouter(prefix="/api")
 
@@ -142,7 +143,7 @@ def first_setup(body: s.SetupIn, db: Session = Depends(get_db)):
                   ical_token=new_ical_token())
     db.add(user)
     db.flush()
-    g = new_group(db, body.group_name or ("Familien" if body.lang == "no" else "Family"), user)
+    g = new_group(db, body.group_name or default_group_name(body.lang), user)
     events.log(db, "setup", f"{user.name} <{user.email}> set up the server with {g.name}", user, g.id)
     db.commit()
     return _token_out(db, user)
@@ -471,7 +472,7 @@ def _role_out(db: Session, r: m.Role) -> s.RoleOut:
 
 @router.get("/permissions")
 def permission_catalog(user: m.User = Depends(current_user)):
-    i = 1 if user.lang == "no" else 0
+    i = INDEX[norm(user.lang)]
     return [{"key": k, "label": v[i]} for k, v in PERMISSIONS.items()]
 
 
@@ -1219,13 +1220,13 @@ def apply_template(asset_id: int, key: str = Query(...), start: Optional[date] =
     tpl = find_template(key)
     if tpl is None:
         raise HTTPException(404, "Template not found")
-    lang = user.lang if user.lang in ("en", "no") else "en"
+    lang = norm(user.lang)
     start = start or date.today()
 
     existing_components = {c.name.lower(): c for c in asset.components}
     comp_by_key: dict[str, m.Component] = {}
     for ckey, names in tpl["components"].items():
-        name = names[lang]
+        name = names.get(lang) or names["en"]
         comp = existing_components.get(name.lower())
         if comp is None:
             comp = m.Component(asset_id=asset.id, name=name)
@@ -1235,8 +1236,9 @@ def apply_template(asset_id: int, key: str = Query(...), start: Optional[date] =
 
     existing_tasks = {t.title.lower() for t in asset.tasks}
     created = 0
-    for title_en, title_no, value, unit, ckey, *season in tpl["tasks"]:
-        title = title_no if lang == "no" else title_en
+    for task in tpl["tasks"]:
+        value, unit, ckey, *season = task[2:]
+        title = task_title(task, lang)
         due = start
         if season:  # seasonal job: next occurrence of that day of the year
             month, day = map(int, season[0].split("-"))
