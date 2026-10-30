@@ -13,6 +13,14 @@ if not exist ".git" (
 
 echo ===== 1. Test automatici =====
 if exist ".venv\Scripts\python.exe" (
+    ".venv\Scripts\python.exe" -c "import sys" >nul 2>nul
+    if errorlevel 1 (
+        echo !! L'ambiente Python non funziona su questo PC. Avvia prima run_local.bat, poi riprova.
+        pause
+        exit /b 1
+    )
+)
+if exist ".venv\Scripts\python.exe" (
     call .venv\Scripts\activate.bat
     python -m pip install --quiet -r backend\requirements.txt -r backend\requirements-dev.txt
     pushd backend

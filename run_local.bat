@@ -3,11 +3,21 @@ REM TotalMaint - start locally on Windows (no Docker needed).
 REM First run creates a virtual environment and installs the packages.
 cd /d "%~dp0"
 
+REM .venv sits in OneDrive: if it was made on another PC its Python may not exist here.
+if exist ".venv\Scripts\python.exe" (
+    ".venv\Scripts\python.exe" -c "import sys" >nul 2>nul
+    if errorlevel 1 (
+        echo The virtual environment was made on another PC. Recreating it for this PC...
+        rmdir /s /q .venv
+    )
+)
+
 if not exist ".venv\Scripts\python.exe" (
     echo Creating virtual environment...
     py -3 -m venv .venv || python -m venv .venv
     if errorlevel 1 (
-        echo Could not create the virtual environment. Is Python 3.11+ installed?
+        echo Could not create the virtual environment. Install Python 3.13 from https://www.python.org/downloads/
+        echo ^(tick "Add python.exe to PATH"^), then start this file again.
         pause
         exit /b 1
     )
