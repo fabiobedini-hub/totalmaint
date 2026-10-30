@@ -64,6 +64,13 @@ solved on the NAS with Tailscale or the reverse proxy (see below).
 * **Overview**: overdue, due soon, next 60 days, cost this year, recent work.
 * **Calendar**: month view with future repeats, plus an **iCal link** to subscribe from
   Outlook / Google / iPhone.
+* **Groups and roles**: everything belongs to a group (a family, a boat club …), and groups don't
+  see each other. Each group has the roles Owner, Admin, Creator and Viewer; the admin ticks what
+  each role may do under Settings → Roles and can add roles of their own. Owner always has
+  everything. All checks are in `backend/app/permissions.py`.
+* **Invitations** by e-mail: a one-time link valid for `INVITE_DAYS` (14). Without SMTP the app
+  shows the link to copy. New people can only sign up and start their own group when
+  `SIGNUP_CODE` is set in `.env`.
 * **Multiple users** with their own language (English / Norwegian) and "only my tasks".
 * **E-mail reminders** once a day (configure SMTP in `.env`; without it they are only logged).
 

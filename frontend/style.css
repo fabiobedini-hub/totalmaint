@@ -491,3 +491,14 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--f
   .ps-table thead { display: table-header-group; }
   .pill { border: 1px solid currentColor; background: none !important; }
 }
+
+/* role editor: permissions in small groups */
+.perm-group { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 0 16px; padding: 10px 0 0; border-top: 1px solid var(--line); }
+.perm-group:first-of-type { border-top: 0; padding-top: 0; }
+.perm-group .check { margin-bottom: 10px; }
+.sidebar .who .small { color: var(--ink-3); margin-top: 2px; }
+.check input { flex: none; }
+.read-only-note { margin: 0 0 12px; }
+/* text-style buttons on the log-in pages ("Forgot your password?", "Back to log in") */
+.auth button.link { border: 0; background: none; padding: 4px 2px; font: inherit; color: var(--fjord); font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+.auth button.link:hover { color: var(--ink); }

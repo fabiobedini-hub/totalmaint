@@ -37,6 +37,13 @@ def get_db():
 # Columns added after the first release. create_all() makes new tables but never changes
 # existing ones, so these are added by hand when missing. Existing rows get NULL.
 NEW_COLUMNS = {
+    "users": {
+        "current_group_id": "INTEGER REFERENCES groups(id) ON DELETE SET NULL",
+        "session_version": "INTEGER NOT NULL DEFAULT 0",
+    },
+    "vendors": {
+        "group_id": "INTEGER REFERENCES groups(id) ON DELETE CASCADE",
+    },
     "tasks": {
         "vendor_id": "INTEGER REFERENCES vendors(id) ON DELETE SET NULL",
         "created_by_id": "INTEGER REFERENCES users(id) ON DELETE SET NULL",
@@ -48,6 +55,7 @@ NEW_COLUMNS = {
         "vendor_booked_for": "DATE",
     },
     "assets": {
+        "group_id": "INTEGER REFERENCES groups(id) ON DELETE CASCADE",
         "counter_unit": "VARCHAR(10) NOT NULL DEFAULT 'none'",
         "counter_value": "FLOAT",
         "counter_on": "DATE",
@@ -87,17 +95,19 @@ def link_part_suppliers() -> int:
         parts = db.scalars(select(m.SparePart).where(m.SparePart.vendor_id.is_(None), m.SparePart.supplier.is_not(None))).all()
         if not parts:
             return 0
-        by_name = {v.company.strip().lower(): v for v in db.scalars(select(m.Vendor))}
+        # vendors belong to a group: match and create inside the group of the part's thing
+        by_name = {(v.group_id, v.company.strip().lower()): v for v in db.scalars(select(m.Vendor))}
         for p in parts:
             name = (p.supplier or "").strip()
             if not name:
                 continue
-            v = by_name.get(name.lower())
+            gid = p.asset.group_id if p.asset else None
+            v = by_name.get((gid, name.lower()))
             if v is None:
-                v = m.Vendor(company=name, active=True)
+                v = m.Vendor(company=name, active=True, group_id=gid)
                 db.add(v)
                 db.flush()
-                by_name[name.lower()] = v
+                by_name[(gid, name.lower())] = v
             p.vendor_id = v.id
             n += 1
         db.commit()

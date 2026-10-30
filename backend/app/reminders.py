@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from . import models as m
 from .auth import admin_user
+from .permissions import Ctx, require
 from .config import (PUBLIC_URL, REMINDER_HOUR, SMTP_FROM, SMTP_HOST, SMTP_PASSWORD, SMTP_PORT,
                      SMTP_USER)
 from .db import SessionLocal, get_db
@@ -26,14 +27,21 @@ log = logging.getLogger("totalmaint.reminders")
 router = APIRouter(prefix="/api/reminders")
 
 
-def collect(db: Session) -> dict[int, list[m.Task]]:
-    """Tasks to remind about, per user id. Unassigned tasks go to everyone."""
+def collect(db: Session, group_id: int | None = None) -> dict[int, list[m.Task]]:
+    """Tasks to remind about, per user id: from the groups the user is in (every role, viewers too).
+    Unassigned tasks go to every member of the group. group_id limits it to one group."""
     users = db.scalars(select(m.User).where(m.User.email_reminders.is_(True))).all()
     tasks = [t for t in db.scalars(select(m.Task).where(m.Task.active.is_(True)))
              if task_status(t) in ("overdue", "due_soon")]
+    groups_of: dict[int, set[int]] = {}
+    for mem in db.scalars(select(m.Membership)):
+        groups_of.setdefault(mem.user_id, set()).add(mem.group_id)
     out: dict[int, list[m.Task]] = {}
     for u in users:
-        mine = [t for t in tasks if t.assigned_to_id in (None, u.id)]
+        gids = groups_of.get(u.id, set())
+        if group_id is not None:
+            gids = gids & {group_id}
+        mine = [t for t in tasks if t.asset.group_id in gids and t.assigned_to_id in (None, u.id)]
         if mine:
             out[u.id] = sorted(mine, key=lambda t: t.next_due or date.min)
     return out
@@ -114,6 +122,63 @@ def send_mail(msg: EmailMessage) -> None:
         smtp.send_message(msg)
 
 
+def send_password_reset(user: m.User, link: str, hours: int, lang: str | None = None) -> tuple[bool, str | None]:
+    """E-mail a "forgot password" link. Returns (sent, error)."""
+    if not SMTP_HOST:
+        return False, "SMTP_HOST is not set in .env"
+    no = (lang or user.lang) == "no"
+    msg = EmailMessage()
+    msg["Subject"] = "TotalMaint: nytt passord" if no else "TotalMaint: reset your password"
+    msg["From"] = SMTP_FROM or SMTP_USER
+    msg["To"] = user.email
+    if no:
+        body = (f"Hei {user.name},\n\nNoen (forhåpentligvis du) ba om å lage nytt passord i TotalMaint.\n\n"
+                f"Åpne lenken for å velge et nytt passord:\n{link}\n\n"
+                f"Lenken virker én gang i {hours} timer. Ba du ikke om dette, kan du se bort fra e-posten; "
+                f"passordet ditt er ikke endret.\n")
+    else:
+        body = (f"Hi {user.name},\n\nSomeone (hopefully you) asked to reset the password for TotalMaint.\n\n"
+                f"Open this link to choose a new password:\n{link}\n\n"
+                f"The link works once for {hours} hours. If you didn't ask for this, ignore this e-mail; "
+                f"your password has not changed.\n")
+    msg.set_content(body)
+    try:
+        send_mail(msg)
+        return True, None
+    except Exception as exc:
+        log.error("Password reset e-mail to %s failed: %s", user.email, exc)
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def send_invitation(inv: m.Invitation, lang: str) -> tuple[bool, str | None]:
+    """E-mail the invitation link. Returns (sent, error). Without SMTP the link is only shown in the app."""
+    if not SMTP_HOST:
+        return False, "SMTP_HOST is not set in .env: copy the link and send it yourself"
+    no = lang == "no"
+    who = inv.invited_by.name if inv.invited_by else "TotalMaint"
+    link = f"{PUBLIC_URL}/#/invite/{inv.token}"
+    msg = EmailMessage()
+    msg["Subject"] = (f"{who} inviterer deg til «{inv.group.name}» i TotalMaint" if no
+                      else f"{who} invited you to \"{inv.group.name}\" on TotalMaint")
+    msg["From"] = SMTP_FROM or SMTP_USER
+    msg["To"] = inv.email
+    if no:
+        body = (f"Hei,\n\n{who} har invitert deg til «{inv.group.name}» i TotalMaint, "
+                f"med rollen {inv.role.name}.\n\nÅpne lenken for å bli med:\n{link}\n\n"
+                f"Lenken virker én gang og går ut {inv.expires_at:%d.%m.%Y}.\n")
+    else:
+        body = (f"Hi,\n\n{who} has invited you to \"{inv.group.name}\" on TotalMaint "
+                f"as {inv.role.name}.\n\nOpen this link to join:\n{link}\n\n"
+                f"The link works once and expires on {inv.expires_at:%Y-%m-%d}.\n")
+    msg.set_content(body)
+    try:
+        send_mail(msg)
+        return True, None
+    except Exception as exc:
+        log.error("Invitation e-mail to %s failed: %s", inv.email, exc)
+        return False, f"{type(exc).__name__}: {exc}"
+
+
 async def scheduler_loop() -> None:
     """Very small scheduler: wakes up every 15 minutes, runs once per day after REMINDER_HOUR."""
     last_run: date | None = None
@@ -130,11 +195,11 @@ async def scheduler_loop() -> None:
 
 
 @router.get("/preview")
-def preview(_: m.User = Depends(admin_user), db: Session = Depends(get_db)):
-    """What would be sent right now (does not send anything)."""
+def preview(ctx: Ctx = Depends(require("members.manage")), db: Session = Depends(get_db)):
+    """What would be sent right now to the members of your group (does not send anything)."""
     return [
         {"user": db.get(m.User, uid).email, "tasks": [f"{t.title} ({t.next_due})" for t in tasks]}
-        for uid, tasks in collect(db).items()
+        for uid, tasks in collect(db, ctx.group.id).items()
     ]
 
 

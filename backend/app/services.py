@@ -130,10 +130,14 @@ def asset_total_cost(db: Session, asset_id: int) -> float:
 
 
 def calendar_events(db: Session, start: date, end: date, user_id: int | None = None,
-                    asset_id: int | None = None) -> list[dict]:
-    """Task due dates (with future recurrences projected), completions and warranty end dates in [start, end]."""
+                    asset_id: int | None = None, group_ids: list[int] | None = None) -> list[dict]:
+    """Task due dates (with future recurrences projected), completions and warranty end dates in [start, end].
+    group_ids: only things of these groups (always given by the API; None = everything)."""
     events: list[dict] = []
+    ids = select(m.Asset.id).where(m.Asset.group_id.in_(group_ids)) if group_ids is not None else None
     q = select(m.Task).where(m.Task.active.is_(True), m.Task.next_due.is_not(None))
+    if ids is not None:
+        q = q.where(m.Task.asset_id.in_(ids))
     if user_id is not None:
         q = q.where((m.Task.assigned_to_id == user_id) | (m.Task.assigned_to_id.is_(None)))
     if asset_id is not None:
@@ -157,6 +161,8 @@ def calendar_events(db: Session, start: date, end: date, user_id: int | None = N
     # days agreed with a vendor
     bq = select(m.Task).where(m.Task.active.is_(True), m.Task.vendor_status == "confirmed",
                               m.Task.vendor_booked_for >= start, m.Task.vendor_booked_for <= end)
+    if ids is not None:
+        bq = bq.where(m.Task.asset_id.in_(ids))
     if user_id is not None:
         bq = bq.where((m.Task.assigned_to_id == user_id) | (m.Task.assigned_to_id.is_(None)))
     if asset_id is not None:
@@ -170,6 +176,9 @@ def calendar_events(db: Session, start: date, end: date, user_id: int | None = N
 
     cq = select(m.Completion).join(m.Task).where(m.Completion.done_on >= start, m.Completion.done_on <= end)
     wq = select(m.Warranty).where(m.Warranty.end_date >= start, m.Warranty.end_date <= end)
+    if ids is not None:
+        cq = cq.where(m.Task.asset_id.in_(ids))
+        wq = wq.where(m.Warranty.asset_id.in_(ids))
     if asset_id is not None:
         cq = cq.where(m.Task.asset_id == asset_id)
         wq = wq.where(m.Warranty.asset_id == asset_id)

@@ -28,6 +28,17 @@ const daysFromToday = (iso) => Math.round((Date.parse(iso) - Date.parse(todayIso
 const fmtDate = (iso) => (iso ? new Date(iso + "T12:00:00").toLocaleDateString(locale(), { day: "numeric", month: "short", year: "numeric" }) : "");
 const money = (n) => (n == null ? "" : `${Math.round(n).toLocaleString(locale())} kr`);
 
+// What the user's role allows in the active group. The server checks every call; this only
+// hides what the user can't use: any element with data-perm="tasks.create" etc. is removed
+// as soon as it appears on the page, when the role doesn't have that permission.
+const can = (perm) => !!state.user?.permissions?.includes(perm);
+function applyPerms(root) {
+  if (root.matches?.("[data-perm]") && !can(root.dataset.perm)) { root.remove(); return; }
+  root.querySelectorAll?.("[data-perm]").forEach((el) => { if (!can(el.dataset.perm)) el.remove(); });
+}
+new MutationObserver((muts) => muts.forEach((m) => m.addedNodes.forEach((n) => { if (n.nodeType === 1) applyPerms(n); })))
+  .observe(document.documentElement, { childList: true, subtree: true });
+
 function stamp(iso) {
   if (!iso) return { d: "–", m: "" };
   const dt = new Date(iso + "T12:00:00");
@@ -178,7 +189,7 @@ function fieldHtml(f, value) {
   } else if (f.type === "file") input = `<input type="file" id="${id}" name="${f.name}" multiple>`;
   else {
     const extra = f.type === "number" ? `step="${f.step || "any"}" inputmode="decimal"` : "";
-    input = `<input type="${f.type || "text"}" id="${id}" name="${f.name}" value="${esc(v)}" ${f.required ? "required" : ""} ${extra} ${f.autocomplete ? `autocomplete="${f.autocomplete}"` : ""}>`;
+    input = `<input type="${f.type || "text"}" id="${id}" name="${f.name}" value="${esc(v)}" ${f.required ? "required" : ""} ${extra} ${f.autocomplete ? `autocomplete="${f.autocomplete}"` : ""} ${f.placeholder ? `placeholder="${esc(f.placeholder)}"` : ""}>`;
     if (f.type === "password") {
       input = `<span class="pw-wrap">${input}<button type="button" class="pw-toggle" data-pw aria-pressed="false"
         aria-label="${esc(T("show_password"))}" title="${esc(T("show_password"))}">${ICON.eye}</button></span>`;
@@ -214,9 +225,16 @@ function readForm(root, fields) {
 }
 
 // container: show the form right on the page (no pop-up window). Save/Cancel wake up once something changes.
-function openForm({ title, fields, values = {}, submitLabel = T("save"), onSubmit, onDelete, intro = "", outro = "", container = null }) {
+// editPerm / deletePerm: without that permission the form only shows the values / has no Delete.
+function openForm({ title, fields, values = {}, submitLabel = T("save"), onSubmit, onDelete, intro = "", outro = "", container = null,
+  editPerm = null, deletePerm = null }) {
+  const readOnly = !!editPerm && !can(editPerm);
+  if (deletePerm && !can(deletePerm)) onDelete = null;
   const formTag = `<form id="mform" novalidate>${intro}${formHtml(fields, values)}${outro}<button type="submit" hidden></button></form>`;
-  const footer = `${onDelete ? `<button class="btn danger left" data-del type="button">${esc(T("delete"))}</button>` : ""}
+  const footer = readOnly
+    ? `${onDelete ? `<button class="btn danger left" data-del type="button">${esc(T("delete"))}</button>` : ""}
+       ${container ? "" : `<button class="btn" data-close type="button">${esc(T("close"))}</button>`}`
+    : `${onDelete ? `<button class="btn danger left" data-del type="button">${esc(T("delete"))}</button>` : ""}
              <button class="btn" ${container ? "data-reset disabled" : "data-close"} type="button">${esc(T("cancel"))}</button>
              <button class="btn primary" data-ok type="button" ${container ? "disabled" : ""}>${esc(submitLabel)}</button>`;
   let back;
@@ -225,6 +243,16 @@ function openForm({ title, fields, values = {}, submitLabel = T("save"), onSubmi
     back = container;
   } else back = modal({ title, html: formTag, footer });
   const form = $("#mform", back);
+  if (readOnly) {
+    form.insertAdjacentHTML("afterbegin", `<p class="small muted read-only-note">${esc(T("read_only"))}</p>`);
+    $$("input, select, textarea", form).forEach((i) => { i.disabled = true; });
+    $$(".dropzone, input[type=file]", form).forEach((i) => (i.closest(".field") || i).remove());
+    $("[data-del]", back)?.addEventListener("click", async () => {
+      if (!confirm(T("confirm_delete"))) return;
+      try { await onDelete(); closeModal(); toast(T("deleted")); } catch (err) { fail(err); }
+    });
+    return back;
+  }
   if (container) {
     const okBtn = $("[data-ok]", back), resetBtn = $("[data-reset]", back);
     const dirty = (on) => { okBtn.disabled = !on; resetBtn.disabled = !on; back.classList.toggle("dirty", on); };
@@ -265,7 +293,7 @@ function entryHtml(t, { showAsset = true } = {}) {
     <span class="stamp"><span class="d">${s.d}</span><span class="m">${esc(s.m)}</span></span>
     <span class="body"><div class="entry-title">${esc(t.title)}${vendorPill(t)}</div><div class="meta">${esc(meta)}</div></span>
     <span class="side"><span class="when ${t.status}">${esc(whenText(t))}</span>
-      ${t.active ? `<button class="done-btn" data-done="${t.id}" title="${esc(T("mark_done"))}" aria-label="${esc(T("mark_done"))}: ${esc(t.title)}">${ICON.check}</button>` : ""}
+      ${t.active ? `<button class="done-btn" data-perm="tasks.complete" data-done="${t.id}" title="${esc(T("mark_done"))}" aria-label="${esc(T("mark_done"))}: ${esc(t.title)}">${ICON.check}</button>` : ""}
     </span></a>`;
 }
 
@@ -294,14 +322,15 @@ async function completeDialog(taskId) {
   if (task.counter_unit) {
     fields.push({ name: "counter_value", label: T("counter_at_done", unitShort(task.counter_unit)), type: "number", default: task.counter_current ?? "" });
   }
-  fields.push({ name: "notes", label: T("notes"), type: "textarea" }, { name: "files", label: T("invoice_or_receipt"), type: "file" });
+  fields.push({ name: "notes", label: T("notes"), type: "textarea" });
+  if (can("attachments.add")) fields.push({ name: "files", label: T("invoice_or_receipt"), type: "file" });
   openForm({
     title: `${T("mark_done")}: ${task.title}`,
     fields,
     submitLabel: T("done"),
     onSubmit: async (v) => {
       const res = await api(`/api/tasks/${taskId}/complete`, { method: "POST", body: { done_on: v.done_on || todayIso(), cost: v.cost, notes: v.notes, counter_value: v.counter_value ?? null, vendor_id: v.vendor_id ?? null } });
-      if (v.files.length) {
+      if (v.files?.length) {
         const newest = res.completions.reduce((a, b) => (b.id > a.id ? b : a));
         for (const f of v.files) await uploadFile("completion", newest.id, f);
       }
@@ -341,15 +370,16 @@ async function filesWidget(container, entityType, entityId) {
     container.innerHTML = `<div class="files">${files.length ? files.map((f) => `
       <div class="file">${ICON.file}<div class="grow"><button class="link" data-open="${f.id}" data-name="${esc(f.filename)}">${esc(f.filename)}</button>
         <div class="small muted">${fmtDate(f.uploaded_at.slice(0, 10))}, ${Math.max(1, Math.round(f.size / 1024))} kB</div></div>
-        <button class="btn ghost small" data-rm="${f.id}" aria-label="${esc(T("delete"))}">${ICON.x}</button></div>`).join("")
+        <button class="btn ghost small" data-perm="attachments.delete" data-rm="${f.id}" aria-label="${esc(T("delete"))}">${ICON.x}</button></div>`).join("")
       : `<p class="muted small">${esc(T("no_files"))}</p>`}</div>
-      <label class="dropzone">${esc(T("drop_files"))}<input type="file" multiple hidden></label>`;
+      ${can("attachments.add") ? `<label class="dropzone">${esc(T("drop_files"))}<input type="file" multiple hidden></label>` : ""}`;
     $$("[data-open]", container).forEach((b) => b.onclick = () => openAttachment(b.dataset.open, b.dataset.name));
     $$("[data-rm]", container).forEach((b) => b.onclick = async () => {
       if (!confirm(T("confirm_delete"))) return;
       try { await api(`/api/attachments/${b.dataset.rm}`, { method: "DELETE" }); draw(); } catch (e) { fail(e); }
     });
     const zone = $(".dropzone", container);
+    if (!zone) return;
     const input = $("input", zone);
     const send = async (list) => {
       for (const f of list) { try { await uploadFile(entityType, entityId, f); } catch (e) { fail(e); } }
@@ -369,9 +399,10 @@ async function miniFiles(el, entityType, entityId) {
   try { files = await api(`/api/attachments?entity_type=${entityType}&entity_id=${entityId}`); } catch { return; }
   el.innerHTML = `<div class="mini-files">${files.map((f) =>
     `<button class="btn ghost small" type="button" data-open="${f.id}" data-name="${esc(f.filename)}">${ICON.file}${esc(f.filename)}</button>`).join("")}
-    <label class="btn ghost small attach">${ICON.plus}${esc(T("attach_receipt"))}<input type="file" multiple hidden></label></div>`;
+    ${can("attachments.add") ? `<label class="btn ghost small attach">${ICON.plus}${esc(T("attach_receipt"))}<input type="file" multiple hidden></label>` : ""}</div>`;
   $$("[data-open]", el).forEach((b) => b.onclick = () => openAttachment(b.dataset.open, b.dataset.name));
   const input = $("input", el);
+  if (!input) return;
   input.onchange = async () => {
     for (const f of input.files) { try { await uploadFile(entityType, entityId, f); } catch (e) { fail(e); } }
     toast(T("uploaded"));
@@ -381,44 +412,165 @@ async function miniFiles(el, entityType, entityId) {
 
 // ---------------------------------------------------------------- auth screens
 function logout() {
-  state.token = null; state.user = null;
+  state.token = null; state.user = null; state.users = []; state.vendors = [];
   localStorage.removeItem("tm_token");
   location.hash = "#/";
   render();
 }
 
-async function renderAuth() {
+function loggedIn(res) {
+  state.token = res.token;
+  localStorage.setItem("tm_token", res.token);
+  state.user = null;  // /api/me brings group, role and permissions
+  setLang(res.user.lang);
+  shellRendered = false;
+  state.users = []; state.vendors = []; state.assetFilter = null; localStorage.removeItem("tm_asset");
+}
+
+// mode: "login" | "setup" (first user ever) | "signup" (new group, needs the sign-up code)
+async function renderAuth(mode) {
   const app = $("#app");
-  let needsSetup = false;
-  try { needsSetup = (await api("/api/auth/status")).needs_setup; } catch (e) { fail(e); }
-  const fields = needsSetup
-    ? [{ name: "name", label: T("name"), required: true, autocomplete: "name" },
-       { name: "email", label: T("email"), type: "email", required: true, autocomplete: "email" },
-       { name: "password", label: T("password"), type: "password", required: true, autocomplete: "new-password" }]
+  let status = { needs_setup: false, signup_enabled: false };
+  try { status = await api("/api/auth/status"); } catch (e) { fail(e); }
+  mode = status.needs_setup ? "setup" : mode === "signup" && status.signup_enabled ? "signup" : "login";
+  const newAccount = [{ name: "name", label: T("name"), required: true, autocomplete: "name" },
+    { name: "email", label: T("email"), type: "email", required: true, autocomplete: "email" },
+    { name: "password", label: T("password"), type: "password", required: true, autocomplete: "new-password" }];
+  const fields = mode === "setup" ? newAccount
+    : mode === "signup" ? [...newAccount, { name: "group_name", label: T("group_name"), required: true, placeholder: T("group_name_hint") },
+                           { name: "code", label: T("signup_code"), required: true }]
     : [{ name: "email", label: T("email"), type: "email", required: true, autocomplete: "username" },
        { name: "password", label: T("password"), type: "password", required: true, autocomplete: "current-password" }];
+  const title = { setup: "setup_title", signup: "signup_title", login: "login_title" }[mode];
+  const lead = { setup: "setup_lead", signup: "signup_lead", login: "login_lead" }[mode];
   app.innerHTML = `<div class="auth-wrap"><div class="auth">
     <div class="brand"><img src="icon.svg" alt=""><span>${T("app")}</span></div>
-    <div class="panel"><h1>${esc(T(needsSetup ? "setup_title" : "login_title"))}</h1>
-      <p class="lead">${esc(T(needsSetup ? "setup_lead" : "login_lead"))}</p>
-      <form id="authform">${formHtml(fields)}<button class="btn primary" style="width:100%">${esc(T(needsSetup ? "create_account" : "log_in"))}</button></form>
+    <div class="panel"><h1>${esc(T(title))}</h1>
+      <p class="lead">${esc(T(lead))}</p>
+      <form id="authform">${formHtml(fields)}<button class="btn primary" style="width:100%">${esc(T(mode === "login" ? "log_in" : "create_account"))}</button></form>
+      ${mode === "login" ? `<p class="small" style="text-align:center;margin:14px 0 0"><button class="link" type="button" id="toForgot">${esc(T("forgot_link"))}</button></p>` : ""}
+      ${mode === "login" && status.signup_enabled ? `<p class="small" style="text-align:center;margin:8px 0 0"><button class="link" id="toSignup">${esc(T("signup_link"))}</button></p>` : ""}
+      ${mode === "signup" ? `<p class="small" style="text-align:center;margin:14px 0 0"><button class="link" id="toLogin">${esc(T("have_account"))}</button></p>` : ""}
     </div>
     <div class="lang-switch"><button class="btn small ${state.lang === "no" ? "primary" : ""}" data-lang="no">Norsk</button>
       <button class="btn small ${state.lang === "en" ? "primary" : ""}" data-lang="en">English</button></div>
   </div></div>`;
-  $$("[data-lang]", app).forEach((b) => b.onclick = () => { setLang(b.dataset.lang); renderAuth(); });
+  $$("[data-lang]", app).forEach((b) => b.onclick = () => { setLang(b.dataset.lang); renderAuth(mode); });
+  $("#toSignup")?.addEventListener("click", () => renderAuth("signup"));
+  $("#toForgot")?.addEventListener("click", () => renderForgot($('[name="email"]', app)?.value || ""));
+  $("#toLogin")?.addEventListener("click", () => renderAuth("login"));
   $("#authform").onsubmit = async (e) => {
     e.preventDefault();
     const v = readForm(e.target, fields);
     try {
-      const res = needsSetup
-        ? await api("/api/auth/setup", { method: "POST", body: { ...v, lang: state.lang } })
-        : await api("/api/auth/login", { method: "POST", body: v });
-      state.token = res.token;
-      localStorage.setItem("tm_token", res.token);
-      state.user = res.user;
-      setLang(res.user.lang);
-      shellRendered = false;
+      const path = { setup: "/api/auth/setup", signup: "/api/auth/signup", login: "/api/auth/login" }[mode];
+      const body = mode === "login" ? v : { ...v, lang: state.lang };
+      loggedIn(await api(path, { method: "POST", body }));
+      render();
+    } catch (err) { fail(err); }
+  };
+}
+
+// Same frame as the log-in screen, for the smaller pages around it
+function authFrame(inner, onLang) {
+  const app = $("#app");
+  app.innerHTML = `<div class="auth-wrap"><div class="auth">
+    <div class="brand"><img src="icon.svg" alt=""><span>${T("app")}</span></div>
+    <div class="panel">${inner}</div>
+    <div class="lang-switch"><button class="btn small ${state.lang === "no" ? "primary" : ""}" data-lang="no">Norsk</button>
+      <button class="btn small ${state.lang === "en" ? "primary" : ""}" data-lang="en">English</button></div>
+  </div></div>`;
+  $$("[data-lang]", app).forEach((b) => b.onclick = () => { setLang(b.dataset.lang); onLang(); });
+  return app;
+}
+
+// "Forgot password?": ask for the e-mail address, the server mails a one-time link
+function renderForgot(email = "") {
+  const fields = [{ name: "email", label: T("email"), type: "email", required: true, autocomplete: "username" }];
+  const app = authFrame(`<h1>${esc(T("forgot_title"))}</h1><p class="lead">${esc(T("forgot_lead"))}</p>
+      <form id="forgotform">${formHtml(fields, { email })}<button class="btn primary" style="width:100%">${esc(T("forgot_send"))}</button></form>
+      <p class="small" style="text-align:center;margin:14px 0 0"><button class="link" type="button" id="toLogin">${esc(T("back_to_login"))}</button></p>`,
+    () => renderForgot($('[name="email"]')?.value || ""));
+  $("#toLogin").onclick = () => renderAuth("login");
+  $("#forgotform").onsubmit = async (e) => {
+    e.preventDefault();
+    const v = readForm(e.target, fields);
+    if (!v.email) return toast(`${T("email")}?`, true);
+    try {
+      const r = await api("/api/auth/forgot", { method: "POST", body: { email: v.email, lang: state.lang } });
+      authFrame(`<h1>${esc(T("forgot_title"))}</h1>
+        <p class="lead">${esc(r.mail_enabled ? T("forgot_sent", v.email) : T("forgot_no_mail"))}</p>
+        <button class="btn" style="width:100%" id="toLogin">${esc(T("back_to_login"))}</button>`, () => renderForgot(v.email));
+      $("#toLogin").onclick = () => renderAuth("login");
+    } catch (err) { fail(err); }
+  };
+}
+
+// The page behind the link in a reset e-mail: #/reset/<token>
+async function renderReset(token) {
+  let info;
+  try { info = await api(`/api/auth/reset/${token}`); }
+  catch (e) {
+    const app = authFrame(`<h1>${esc(T("reset_title"))}</h1><p class="lead">${esc(e.message)}</p>
+      <button class="btn primary" style="width:100%" id="again">${esc(T("forgot_again"))}</button>`, () => renderReset(token));
+    $("#again", app).onclick = () => { history.replaceState(null, "", "#/"); renderForgot(); };
+    return;
+  }
+  const fields = [
+    { name: "password", label: T("choose_password"), type: "password", required: true, autocomplete: "new-password" },
+    { name: "password2", label: T("repeat_password"), type: "password", required: true, autocomplete: "new-password" },
+  ];
+  authFrame(`<h1>${esc(T("reset_title"))}</h1><p class="lead">${esc(T("reset_lead", info.name))}</p>
+      <p class="small muted">${esc(info.email)}</p>
+      <form id="resetform">${formHtml(fields)}<button class="btn primary" style="width:100%">${esc(T("reset_save"))}</button></form>`,
+    () => renderReset(token));
+  $("#resetform").onsubmit = async (e) => {
+    e.preventDefault();
+    const v = readForm(e.target, fields);
+    if (!v.password || v.password.length < 6) return toast(T("password_short"), true);
+    if (v.password !== v.password2) return toast(T("password_mismatch"), true);
+    try {
+      loggedIn(await api(`/api/auth/reset/${token}`, { method: "POST", body: { password: v.password } }));
+      toast(T("reset_done"));
+      location.hash = "#/";
+      render();
+    } catch (err) { fail(err); }
+  };
+}
+
+// The page behind the link in an invitation e-mail: #/invite/<token>
+async function renderInvite(token) {
+  const app = $("#app");
+  let info;
+  try { info = await api(`/api/invite/${token}`); }
+  catch (e) {
+    app.innerHTML = `<div class="auth-wrap"><div class="auth"><div class="brand"><img src="icon.svg" alt=""><span>${T("app")}</span></div>
+      <div class="panel"><h1>${esc(T("invite_title"))}</h1><p class="lead">${esc(e.message)}</p>
+      <a class="btn" href="#/" style="width:100%">${esc(T(state.token ? "nav_home" : "log_in"))}</a></div></div></div>`;
+    return;
+  }
+  const fields = info.has_account
+    ? [{ name: "password", label: T("password"), type: "password", required: true, autocomplete: "current-password" }]
+    : [{ name: "name", label: T("name"), required: true, autocomplete: "name" },
+       { name: "password", label: T("choose_password"), type: "password", required: true, autocomplete: "new-password" }];
+  app.innerHTML = `<div class="auth-wrap"><div class="auth">
+    <div class="brand"><img src="icon.svg" alt=""><span>${T("app")}</span></div>
+    <div class="panel"><h1>${esc(T("invite_title"))}</h1>
+      <p class="lead">${esc(T("invite_lead", info.invited_by || T("app"), info.group_name, info.role_name))}</p>
+      <p class="small muted">${esc(info.email)}${info.has_account ? ` · ${esc(T("invite_has_account"))}` : ""}</p>
+      <form id="invform">${formHtml(fields)}<button class="btn primary" style="width:100%">${esc(T("join_group"))}</button></form>
+    </div>
+    <div class="lang-switch"><button class="btn small ${state.lang === "no" ? "primary" : ""}" data-lang="no">Norsk</button>
+      <button class="btn small ${state.lang === "en" ? "primary" : ""}" data-lang="en">English</button></div>
+  </div></div>`;
+  $$("[data-lang]", app).forEach((b) => b.onclick = () => { setLang(b.dataset.lang); renderInvite(token); });
+  $("#invform").onsubmit = async (e) => {
+    e.preventDefault();
+    const v = readForm(e.target, fields);
+    try {
+      loggedIn(await api(`/api/invite/${token}/accept`, { method: "POST", body: { ...v, lang: state.lang } }));
+      toast(T("joined_group", info.group_name));
+      location.hash = "#/";
       render();
     } catch (err) { fail(err); }
   };
@@ -442,7 +594,7 @@ function renderShell() {
     `<a href="${href}" data-nav="${href}">${ICON[icon]}<span>${esc(T(key))}</span><span class="badge hidden" data-badge="${key}"></span></a>`).join("");
   $("#app").innerHTML = `<div class="shell">
     <aside class="sidebar"><div class="brand"><img src="icon.svg" alt=""><span>${T("app")}</span></div>
-      <nav class="nav">${links()}</nav><div class="who">${esc(state.user?.name || "")}</div></aside>
+      <nav class="nav">${links()}</nav><div class="who">${esc(state.user?.name || "")}${state.user?.group ? `<div class="small">${esc(state.user.group.name)} · ${esc(state.user.role.name)}</div>` : ""}</div></aside>
     <main class="main" id="main"></main>
     <nav class="tabbar">${links()}</nav></div>`;
   shellRendered = true;
@@ -469,6 +621,10 @@ async function refreshBadges() {
 
 // ---------------------------------------------------------------- router
 async function render() {
+  const inviteToken = (location.hash.match(/^#\/invite\/([\w-]+)/) || [])[1];
+  if (inviteToken) { shellRendered = false; return renderInvite(inviteToken); }
+  const resetToken = (location.hash.match(/^#\/reset\/([\w-]+)/) || [])[1];
+  if (resetToken) { shellRendered = false; return renderReset(resetToken); }
   if (!state.token) { shellRendered = false; return renderAuth(); }
   if (!state.user) {
     try { state.user = await api("/api/me"); setLang(state.user.lang); } catch (e) { return; }
@@ -641,7 +797,7 @@ const KINDS = ["home", "car", "boat", "cabin", "bicycle", "motorcycle", "scooter
 
 // "Documents and receipts" in a form: a file list when editing, a file picker when creating
 const docsOutro = (obj) => obj ? `<div class="field"><span class="form-sub">${esc(T("docs_and_receipts"))}</span><div id="formfiles"></div></div>` : "";
-function docsField(fields, obj) { if (!obj) fields.push({ name: "files", label: T("docs_and_receipts"), type: "file" }); return fields; }
+function docsField(fields, obj) { if (!obj && can("attachments.add")) fields.push({ name: "files", label: T("docs_and_receipts"), type: "file" }); return fields; }
 async function uploadAll(entityType, id, files) { for (const f of files || []) await uploadFile(entityType, id, f); }
 function mountDocs(entityType, obj) { if (obj) filesWidget($("#formfiles"), entityType, obj.id); }
 
@@ -669,13 +825,14 @@ function assetForm(asset) {
       }
     },
     onDelete: asset ? async () => { await api(`/api/assets/${asset.id}`, { method: "DELETE" }); location.hash = "#/assets"; } : null,
+    editPerm: asset ? "assets.edit" : "assets.create", deletePerm: "assets.delete",
   });
   mountDocs("asset", asset);
 }
 
 function counterDialog(a) {
   const hist = (a.readings || []).length ? `<div class="field"><span class="form-sub">${esc(T("counter_history"))}</span><ul class="list-plain small">${a.readings.map((r) =>
-    `<li><span class="grow">${fmtDate(r.reading_on)}</span><b>${esc(counterVal(r.value, a.counter_unit))}</b><button type="button" class="btn ghost small" data-rmr="${r.id}" aria-label="${esc(T("delete"))}">${ICON.x}</button></li>`).join("")}</ul></div>` : "";
+    `<li><span class="grow">${fmtDate(r.reading_on)}</span><b>${esc(counterVal(r.value, a.counter_unit))}</b><button type="button" class="btn ghost small" data-perm="counters.record" data-rmr="${r.id}" aria-label="${esc(T("delete"))}">${ICON.x}</button></li>`).join("")}</ul></div>` : "";
   const back = openForm({
     title: `${T("counter_update")}: ${a.name}`,
     fields: [
@@ -685,6 +842,7 @@ function counterDialog(a) {
     values: { value: a.counter_value ?? "", reading_on: todayIso() },
     outro: hist,
     onSubmit: async (v) => { await api(`/api/assets/${a.id}/counter`, { method: "POST", body: { value: v.value, reading_on: v.reading_on || todayIso() } }); toast(T("saved")); render(); },
+    editPerm: "counters.record",
   });
   $$("[data-rmr]", back).forEach((b) => b.onclick = async () => {
     if (!confirm(T("confirm_delete"))) return;
@@ -695,7 +853,7 @@ function counterDialog(a) {
 async function pageAssets(main) {
   const assets = await api("/api/assets");
   main.innerHTML = `<div class="page-head"><div class="grow"><h1>${esc(T("things_title"))}</h1><div class="sub">${esc(T("things_sub"))}</div></div>
-      <button class="btn primary" id="add">${ICON.plus}${esc(T("add_thing"))}</button></div>
+      <button class="btn primary" id="add" data-perm="assets.create">${ICON.plus}${esc(T("add_thing"))}</button></div>
     ${assets.length ? `<div class="asset-grid">${assets.map((a) => `
       <a class="asset-card" href="#/asset/${a.id}"><span class="kind-icon">${kindIcon(a.kind)}</span>
         <span><h3>${esc(a.name)}</h3><span class="small muted">${esc(T(`kind_${a.kind}`))}${a.location ? `, ${esc(a.location)}` : ""}</span>
@@ -734,7 +892,8 @@ async function templateDialog(asset) {
 function vendorOptions(selectedId) {
   // inactive vendors are hidden, unless the task already uses one
   const list = state.vendors.filter((v) => v.active || v.id === selectedId);
-  return [["", T("no_vendor")], ...list.map((v) => [v.id, v.trade ? `${v.company} (${v.trade})` : v.company]), ["new", T("new_vendor_option")]];
+  return [["", T("no_vendor")], ...list.map((v) => [v.id, v.trade ? `${v.company} (${v.trade})` : v.company]),
+    ...(can("vendors.manage") ? [["new", T("new_vendor_option")]] : [])];
 }
 
 function taskFields(asset, task) {
@@ -806,7 +965,7 @@ async function taskForm(asset, task, { container = null } = {}) {
   const values = task || { interval_value: 1, interval_unit: "years", next_due: todayIso(), remind_days_before: 7, active: true };
   const fields = taskFields(asset, task);
   // new task: pick files now, they are uploaded right after the task is created
-  if (!task) fields.push({ name: "files", label: T("docs_and_receipts"), type: "file" });
+  if (!task && can("attachments.add")) fields.push({ name: "files", label: T("docs_and_receipts"), type: "file" });
   let resolveVendor = async () => null;
   const back = openForm({
     title: task ? T("edit") : T("add_task"),
@@ -833,6 +992,7 @@ async function taskForm(asset, task, { container = null } = {}) {
       toast(T("saved")); render();
     },
     onDelete: task ? async () => { await api(`/api/tasks/${task.id}`, { method: "DELETE" }); location.hash = `#/asset/${asset.id}`; } : null,
+    editPerm: task ? "tasks.edit" : "tasks.create", deletePerm: "tasks.delete",
   });
   resolveVendor = vendorPicker(back);
   if (!inline) mountDocs("task", task);
@@ -855,6 +1015,7 @@ function componentForm(asset, c) {
       toast(T("saved")); render();
     },
     onDelete: c ? async () => { await api(`/api/components/${c.id}`, { method: "DELETE" }); render(); } : null,
+    editPerm: c ? "components.edit" : "components.create", deletePerm: "components.delete",
   });
   mountDocs("component", c);
 }
@@ -884,7 +1045,7 @@ async function purchaseHistory(container, partId) {
   if (!rows.length) { container.innerHTML = ""; return; }
   container.innerHTML = `<h3 style="margin:4px 0 6px">${esc(T("purchases"))}</h3><ul class="list-plain" style="margin-bottom:18px">${rows.map((r) => `
     <li style="flex-wrap:wrap"><span class="grow">${fmtDate(r.bought_on)}, ${r.qty} ${esc(T("pcs"))}</span><span class="money">${esc(money(r.total))}</span>
-      <button class="btn ghost small" type="button" data-rmbuy="${r.id}" aria-label="${esc(T("delete"))}">${ICON.x}</button>
+      <button class="btn ghost small" type="button" data-perm="history.delete" data-rmbuy="${r.id}" aria-label="${esc(T("delete"))}">${ICON.x}</button>
       <div data-pfiles="${r.id}" style="flex-basis:100%"></div></li>`).join("")}</ul>`;
   for (const el of $$("[data-pfiles]", container)) miniFiles(el, "purchase", Number(el.dataset.pfiles));
   $$("[data-rmbuy]", container).forEach((b) => b.onclick = async () => {
@@ -918,6 +1079,7 @@ async function partForm(asset, p) {
       toast(T("saved")); render();
     },
     onDelete: p ? async () => { await api(`/api/parts/${p.id}`, { method: "DELETE" }); render(); } : null,
+    editPerm: "parts.manage", deletePerm: "parts.manage",
   });
   resolveVendor = vendorPicker(back);
   if (p) purchaseHistory($("#buyhist"), p.id).catch(fail);
@@ -941,6 +1103,7 @@ function warrantyForm(asset, w) {
       toast(T("saved")); render();
     },
     onDelete: w ? async () => { await api(`/api/warranties/${w.id}`, { method: "DELETE" }); render(); } : null,
+    editPerm: "warranties.manage", deletePerm: "warranties.manage",
   });
   if (w) filesWidget($("#wfiles"), "warranty", w.id);
 }
@@ -955,12 +1118,12 @@ async function pageAsset(main, id) {
     <a class="crumb" href="#/assets">${esc(T("things_title"))}</a>
     <div class="page-head"><span class="kind-icon">${kindIcon(a.kind)}</span>
       <div class="grow"><h1>${esc(a.name)}</h1><div class="sub">${esc(T(`kind_${a.kind}`))}${a.location ? `, ${esc(a.location)}` : ""}${a.total_cost ? `. ${esc(T("total_cost"))}: ${esc(money(a.total_cost))}` : ""}</div></div>
-      <div class="actions"><button class="btn" id="tpl">${ICON.template}${esc(T("use_template"))}</button><button class="btn" id="printBtn">${ICON.print}${esc(T("print"))}</button><button class="btn" id="edit">${esc(T("edit"))}</button></div></div>
+      <div class="actions"><button class="btn" id="tpl" data-perm="templates.apply">${ICON.template}${esc(T("use_template"))}</button><button class="btn" id="printBtn">${ICON.print}${esc(T("print"))}</button><button class="btn" id="edit" data-perm="assets.edit">${esc(T("edit"))}</button></div></div>
     ${a.description ? `<p class="muted">${esc(a.description)}</p>` : ""}
     ${a.counter_unit !== "none" ? `<div class="panel counter-box"><div class="grow"><div class="small muted">${esc(T(a.counter_unit === "km" ? "counter_km" : "counter_hours"))}</div>
         <div class="counter-big">${a.counter_value != null ? esc(counterVal(a.counter_value, a.counter_unit)) : "–"}</div>
         <div class="small muted">${a.counter_on ? esc(T("counter_updated", fmtDate(a.counter_on))) : esc(T("counter_never"))}</div></div>
-      <button class="btn primary" id="counterBtn">${esc(T("counter_update"))}</button></div>` : ""}
+      <button class="btn primary" id="counterBtn" data-perm="counters.record">${esc(T("counter_update"))}</button></div>` : ""}
     <div class="tabs" role="tablist">${tabs.map(([k, l, n]) => `<button role="tab" data-tab="${k}" class="${state.assetTab === k ? "active" : ""}">${esc(l)} <span class="count">${n}</span></button>`).join("")}</div>
     <div id="tab"></div>`;
   $("#edit").onclick = () => assetForm(a);
@@ -969,34 +1132,34 @@ async function pageAsset(main, id) {
   $("#counterBtn")?.addEventListener("click", () => counterDialog(a));
   $$("[data-tab]", main).forEach((b) => b.onclick = () => { state.assetTab = b.dataset.tab; pageAsset(main, id); });
   const tab = $("#tab");
-  const addBtn = (label, idAttr) => `<div class="actions" style="margin-bottom:14px"><button class="btn primary" id="${idAttr}">${ICON.plus}${esc(label)}</button></div>`;
+  const addBtn = (label, idAttr, perm) => can(perm) ? `<div class="actions" style="margin-bottom:14px"><button class="btn primary" id="${idAttr}">${ICON.plus}${esc(label)}</button></div>` : "";
 
   if (state.assetTab === "tasks") {
-    tab.innerHTML = addBtn(T("add_task"), "addTask") + (a.tasks.length
+    tab.innerHTML = addBtn(T("add_task"), "addTask", "tasks.create") + (a.tasks.length
       ? `<div class="entries">${a.tasks.map((t) => entryHtml(t, { showAsset: false })).join("")}</div>`
-      : `<div class="empty"><p>${esc(T("template_none"))}</p><button class="btn" id="tpl2">${esc(T("use_template"))}</button></div>`);
-    $("#addTask").onclick = () => taskForm(a);
+      : `<div class="empty"><p>${esc(T("template_none"))}</p><button class="btn" id="tpl2" data-perm="templates.apply">${esc(T("use_template"))}</button></div>`);
+    $("#addTask")?.addEventListener("click", () => taskForm(a));
     $("#tpl2")?.addEventListener("click", () => templateDialog(a));
   } else if (state.assetTab === "components") {
-    tab.innerHTML = addBtn(T("add_component"), "addC") + (a.components.length ? `<table class="table"><thead><tr>
+    tab.innerHTML = addBtn(T("add_component"), "addC", "components.create") + (a.components.length ? `<table class="table"><thead><tr>
         <th>${esc(T("name"))}</th><th>${esc(T("brand"))} / ${esc(T("model"))}</th><th>${esc(T("serial"))}</th><th>${esc(T("installed_on"))}</th></tr></thead><tbody>
         ${a.components.map((c) => `<tr class="clickable" data-id="${c.id}"><td><b>${esc(c.name)}</b></td>
           <td data-l="${esc(T("model"))}">${esc([c.brand, c.model].filter(Boolean).join(" "))}</td><td data-l="${esc(T("serial"))}">${esc(c.serial_number)}</td>
           <td data-l="${esc(T("installed_on"))}">${fmtDate(c.installed_on)}</td></tr>`).join("")}</tbody></table>`
       : `<div class="empty"><p>${esc(T("no_components"))}</p></div>`);
-    $("#addC").onclick = () => componentForm(a);
+    $("#addC")?.addEventListener("click", () => componentForm(a));
     $$("tr[data-id]", tab).forEach((r) => r.onclick = () => componentForm(a, a.components.find((c) => c.id === Number(r.dataset.id))));
   } else if (state.assetTab === "parts") {
-    tab.innerHTML = addBtn(T("add_part"), "addP") + (a.parts.length ? `<table class="table"><thead><tr>
+    tab.innerHTML = addBtn(T("add_part"), "addP", "parts.manage") + (a.parts.length ? `<table class="table"><thead><tr>
         <th>${esc(T("name"))}</th><th>${esc(T("part_number"))}</th><th>${esc(T("supplier"))}</th><th class="num">${esc(T("in_stock"))}</th><th class="num">${esc(T("unit_price"))}</th><th></th><th></th></tr></thead><tbody>
         ${a.parts.map((p) => `<tr class="clickable" data-id="${p.id}"><td><b>${esc(p.name)}</b>${p.component_name ? `<div class="small muted">${esc(p.component_name)}</div>` : ""}</td>
           <td data-l="${esc(T("part_number"))}">${esc(p.part_number)}</td><td data-l="${esc(T("supplier"))}">${p.vendor_id ? `<a href="#/vendor/${p.vendor_id}" data-stop>${esc(p.supplier)}</a>` : esc(p.supplier)}</td>
           <td class="num" data-l="${esc(T("in_stock"))}">${p.qty_in_stock}${p.min_qty ? ` / ${p.min_qty}` : ""}</td>
           <td class="num" data-l="${esc(T("unit_price"))}">${esc(money(p.unit_price))}</td>
           <td>${p.below_min ? `<span class="pill red">${esc(T("below_min"))}</span>` : ""}${p.on_shopping_list ? ` <span class="pill amber">${esc(T("shopping_items"))}</span>` : ""}</td>
-          <td class="num"><button class="btn small" data-buy="${p.id}">${ICON.check}${esc(T("bought"))}</button></td></tr>`).join("")}</tbody></table>`
+          <td class="num"><button class="btn small" data-perm="parts.manage" data-buy="${p.id}">${ICON.check}${esc(T("bought"))}</button></td></tr>`).join("")}</tbody></table>`
       : `<div class="empty"><p>${esc(T("no_parts"))}</p></div>`);
-    $("#addP").onclick = () => partForm(a).catch(fail);
+    $("#addP")?.addEventListener("click", () => partForm(a).catch(fail));
     $$("tr[data-id]", tab).forEach((r) => r.onclick = () => partForm(a, a.parts.find((p) => p.id === Number(r.dataset.id))).catch(fail));
     $$("[data-stop]", tab).forEach((l) => l.onclick = (e) => e.stopPropagation());
     $$("[data-buy]", tab).forEach((b) => b.onclick = (e) => {
@@ -1004,7 +1167,7 @@ async function pageAsset(main, id) {
       purchaseDialog(a.parts.find((p) => p.id === Number(b.dataset.buy)));
     });
   } else if (state.assetTab === "warranties") {
-    tab.innerHTML = addBtn(T("add_warranty"), "addW") + (a.warranties.length ? `<table class="table"><thead><tr>
+    tab.innerHTML = addBtn(T("add_warranty"), "addW", "warranties.manage") + (a.warranties.length ? `<table class="table"><thead><tr>
         <th>${esc(T("title"))}</th><th>${esc(T("provider"))}</th><th>${esc(T("reference"))}</th><th>${esc(T("end_date"))}</th></tr></thead><tbody>
         ${a.warranties.map((w) => {
           const left = w.end_date ? daysFromToday(w.end_date) : null;
@@ -1013,7 +1176,7 @@ async function pageAsset(main, id) {
           <td data-l="${esc(T("provider"))}">${esc(w.provider)}</td><td data-l="${esc(T("reference"))}">${esc(w.reference)}</td><td data-l="${esc(T("end_date"))}">${pill}</td></tr>`;
         }).join("")}</tbody></table>`
       : `<div class="empty"><p>${esc(T("no_warranties"))}</p></div>`);
-    $("#addW").onclick = () => warrantyForm(a);
+    $("#addW")?.addEventListener("click", () => warrantyForm(a));
     $$("tr[data-id]", tab).forEach((r) => r.onclick = () => warrantyForm(a, a.warranties.find((w) => w.id === Number(r.dataset.id))));
   } else {
     tab.innerHTML = `<div id="afiles" style="max-width:640px"></div>`;
@@ -1042,7 +1205,7 @@ async function pageTask(main, id) {
           ${t.component_name ? `<div><dt>${esc(T("component"))}</dt><dd>${esc(t.component_name)}</dd></div>` : ""}
           ${t.estimated_cost != null ? `<div><dt>${esc(T("estimated_cost"))}</dt><dd>${esc(money(t.estimated_cost))}</dd></div>` : ""}
         </dl></div></div>
-    ${t.active ? `<div class="actions" style="margin-bottom:24px"><button class="btn primary" data-done="${t.id}">${ICON.check}${esc(T("mark_done"))}</button></div>` : ""}
+    ${t.active ? `<div class="actions" style="margin-bottom:24px"><button class="btn primary" data-perm="tasks.complete" data-done="${t.id}">${ICON.check}${esc(T("mark_done"))}</button></div>` : ""}
     ${t.vendor_id && t.active ? vendorBox(t) : ""}
     <div class="two-col"><div class="section"><h2>${esc(T("details"))}</h2><div class="panel task-edit" id="taskEdit"><div class="loading">…</div></div></div>
     <div><div class="section"><h2>${esc(T("history"))} <span class="count">${t.completions.length}</span></h2>
@@ -1050,7 +1213,7 @@ async function pageTask(main, id) {
         <div class="h-top"><b>${fmtDate(c.done_on)}</b>${c.cost != null ? `<span class="money">${esc(money(c.cost))}</span>` : ""}
           ${c.vendor_name ? `<a class="small" href="#/vendor/${c.vendor_id}">${esc(c.vendor_name)}</a>` : c.done_by_name ? `<span class="small muted">${esc(c.done_by_name)}</span>` : ""}
           ${c.counter_value != null && t.counter_unit ? `<span class="small muted">${esc(counterVal(c.counter_value, t.counter_unit))}</span>` : ""}
-          <button class="btn ghost small" data-rmc="${c.id}" aria-label="${esc(T("delete"))}">${ICON.x}</button></div>
+          <button class="btn ghost small" data-perm="history.delete" data-rmc="${c.id}" aria-label="${esc(T("delete"))}">${ICON.x}</button></div>
         ${c.notes ? `<div class="small" style="white-space:pre-wrap">${esc(c.notes)}</div>` : ""}
         <div data-cfiles="${c.id}"></div></li>`).join("")}</ul>`
         : `<p class="muted">${esc(T("no_history"))}</p>`}</div>
@@ -1082,7 +1245,7 @@ function vendorBox(t) {
     : T("vs_none_text", t.vendor_name);
   return `<div class="panel vendor-box ${st || "none"}" style="margin-bottom:24px">
     <div class="grow"><div class="small muted">${esc(T("vendor_job"))}</div><b>${esc(text)}</b></div>
-    <div class="actions">
+    <div class="actions" data-perm="tasks.edit">
       <button class="btn${st ? "" : " primary"}" id="vsRequest">${esc(T(st ? "vs_send_again" : "vs_send"))}</button>
       <button class="btn${st === "requested" ? " primary" : ""}" id="vsConfirm">${esc(T(st === "confirmed" ? "vs_change_date" : "vs_confirm"))}</button>
       ${st ? `<button class="btn ghost" id="vsReset">${esc(T("vs_reset"))}</button>` : ""}
@@ -1159,7 +1322,7 @@ async function pageVendor(main, id) {
   main.innerHTML = `
     <a class="crumb" href="#/settings">${esc(T("vendors"))}</a>
     <div class="page-head"><div class="grow"><h1>${esc(v.company)}</h1><div class="sub">${esc(v.trade || "")}${v.trade && contact ? " · " : ""}${contact}</div></div>
-      <div class="actions"><button class="btn" id="editV">${esc(T("edit"))}</button></div></div>
+      <div class="actions"><button class="btn" id="editV" data-perm="vendors.manage">${esc(T("edit"))}</button></div></div>
     <div class="vstats">
       <div class="stat"><div class="small muted">${esc(T("spent_total"))}</div><b>${esc(money(h.total_spent))}</b></div>
       <div class="stat"><div class="small muted">${esc(T("spent_this_year"))}</div><b>${esc(money(h.spent_this_year))}</b></div>
@@ -1174,7 +1337,7 @@ async function pageVendor(main, id) {
         <div><a href="#/task/${j.task_id}">${esc(j.task_title)}</a> <span class="small muted">${esc(j.asset_name)}</span></div>
         ${j.notes ? `<div class="small" style="white-space:pre-wrap">${esc(j.notes)}</div>` : ""}<div data-cfiles="${j.completion_id}"></div></li>`).join("")}</ul>`
         : `<p class="muted">${esc(T("no_jobs_yet"))}</p>`}</div></div>`;
-  $("#editV").onclick = () => vendorForm(v);
+  $("#editV")?.addEventListener("click", () => vendorForm(v));
   for (const el of $$("[data-cfiles]", main)) miniFiles(el, "completion", Number(el.dataset.cfiles));
 }
 
@@ -1357,7 +1520,7 @@ async function pageShopping(main) {
           <span class="grow"><b>${esc(p.name)}</b>${p.part_number ? ` <span class="small muted">${esc(p.part_number)}</span>` : ""}
             <div class="small muted">${esc(p.asset_name)}${p.component_name ? `, ${esc(p.component_name)}` : ""}${p.unit_price ? `, ${esc(money(p.unit_price * qty))}` : ""}
             ${p.url ? `, <a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(T("url"))}</a>` : ""}</div></span>
-          <button class="btn small" data-bought="${p.id}">${ICON.check}${esc(T("bought"))}</button></div>`;
+          <button class="btn small" data-perm="parts.manage" data-bought="${p.id}">${ICON.check}${esc(T("bought"))}</button></div>`;
       }).join("")}</div>`).join("")
       : `<div class="empty"><p>${esc(T("shopping_empty"))}</p></div>`}`;
   $$("[data-bought]", main).forEach((b) => b.onclick = () => purchaseDialog(parts.find((p) => p.id === Number(b.dataset.bought))));
@@ -1387,6 +1550,7 @@ function vendorForm(v) {
       state.vendors = []; toast(T("saved")); render();
     },
     onDelete: v ? async () => { await api(`/api/vendors/${v.id}`, { method: "DELETE" }); state.vendors = []; render(); } : null,
+    editPerm: "vendors.manage", deletePerm: "vendors.manage",
   });
 }
 
@@ -1394,37 +1558,53 @@ function vendorForm(v) {
 async function pageSettings(main) {
   state.user = await api("/api/me");
   const u = state.user;
-  const users = u.is_admin ? await api("/api/users") : [];
-  const vendors = await api("/api/vendors");
+  const manage = can("members.manage"), editRoles = can("roles.manage");
+  const [users, vendors, roles, invites] = await Promise.all([
+    api("/api/users"), api("/api/vendors"), api("/api/roles"), manage ? api("/api/invitations") : Promise.resolve([]),
+  ]);
   state.vendors = vendors;
-  state.users = users.length ? users : state.users;
+  state.users = users;
   const profileFields = [
     { name: "name", label: T("name"), required: true },
     { name: "lang", label: T("language"), type: "select", options: [["no", "Norsk"], ["en", "English"]] },
     { name: "password", label: T("new_password"), type: "password", autocomplete: "new-password" },
     { name: "email_reminders", label: T("email_reminders"), type: "checkbox" },
   ];
+  const head = (title, btns = "") => `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap"><h3 style="flex:1;margin:0">${esc(title)}</h3>${btns}</div>`;
   main.innerHTML = `<div class="page-head"><div class="grow"><h1>${esc(T("settings_title"))}</h1><div class="sub">${esc(u.email)}</div></div>
       <button class="btn" id="logout">${esc(T("log_out"))}</button></div>
     <div class="two-col"><div>
       <div class="panel"><h3>${esc(T("profile"))}</h3><form id="pform">${formHtml(profileFields, u)}<button class="btn primary">${esc(T("save"))}</button></form></div>
-      ${u.is_admin ? `<div class="panel"><div style="display:flex;align-items:center;margin-bottom:10px"><h3 style="flex:1;margin:0">${esc(T("users"))}</h3>
-          <button class="btn small" id="addUser">${ICON.plus}${esc(T("add_user"))}</button></div>
+      <div class="panel">${head(u.group.name, manage ? `<button class="btn ghost small" id="renameGroup">${esc(T("rename"))}</button>` : "")}
+        <p class="small muted" style="margin-top:-4px">${esc(T("your_role"))}: <b>${esc(u.role.name)}</b></p>
+        ${u.groups.length > 1 ? `<label class="field"><span>${esc(T("active_group"))}</span><select id="groupSel">${u.groups.map((g) =>
+          `<option value="${g.id}" ${g.id === u.group.id ? "selected" : ""}>${esc(g.name)} (${esc(g.role)})</option>`).join("")}</select></label>` : ""}
+        ${head(T("members"), manage ? `<button class="btn small" id="invite">${ICON.plus}${esc(T("invite"))}</button><button class="btn ghost small" id="addUser">${esc(T("add_user"))}</button>` : "")}
         <ul class="list-plain">${users.map((x) => `<li><span class="grow"><b>${esc(x.name)}</b>${x.id === u.id ? ` <span class="small muted">(${esc(T("you"))})</span>` : ""}
-          <div class="small muted">${esc(x.email)}</div></span>${x.is_admin ? `<span class="pill">${esc(T("admin"))}</span>` : ""}
-          <button class="btn ghost small" data-user="${x.id}">${esc(T("edit"))}</button></li>`).join("")}</ul></div>` : ""}
+          <div class="small muted">${esc(x.email)}</div></span><span class="pill${x.role_key === "owner" ? " green" : ""}">${esc(x.role_name)}</span>
+          ${manage && (x.role_key !== "owner" || u.is_owner) ? `<button class="btn ghost small" data-user="${x.id}">${esc(T("edit"))}</button>` : ""}</li>`).join("")}</ul>
+        ${invites.length ? `<div class="form-sub" style="margin-top:14px">${esc(T("pending_invites"))}</div><ul class="list-plain">${invites.map((i) => `<li><span class="grow"><b>${esc(i.email)}</b>
+          <div class="small muted">${esc(i.role_name)} · ${esc(T("expires", fmtDate(i.expires_at.slice(0, 10))))}</div></span>
+          <button class="btn ghost small" data-copy="${esc(i.link)}">${esc(T("copy_link"))}</button>
+          <button class="btn ghost small" data-uninvite="${i.id}" aria-label="${esc(T("cancel_invite"))}" title="${esc(T("cancel_invite"))}">${ICON.x}</button></li>`).join("")}</ul>` : ""}
+      </div>
+      <div class="panel">${head(T("roles"), editRoles ? `<button class="btn small" id="addRole">${ICON.plus}${esc(T("new_role"))}</button>` : "")}
+        <p class="small muted" style="margin-top:-4px">${esc(T("roles_help"))}</p>
+        <ul class="list-plain">${roles.map((r) => `<li><span class="grow"><b>${esc(r.name)}</b>${r.locked ? ` <span class="small muted">(${esc(T("locked"))})</span>` : ""}
+          <div class="small muted">${esc(r.locked ? T("all_permissions") : T("n_permissions", r.permissions.length))} · ${esc(T("n_members", r.members))}</div></span>
+          <button class="btn ghost small" data-role="${r.id}">${esc(editRoles && !r.locked ? T("edit") : T("show"))}</button></li>`).join("")}</ul>
+      </div>
     </div><div>
-      <div class="panel"><div style="display:flex;align-items:center;margin-bottom:10px"><h3 style="flex:1;margin:0">${esc(T("vendors"))}</h3>
-          <button class="btn small" id="addVendor">${ICON.plus}${esc(T("add_vendor"))}</button></div>
+      <div class="panel">${head(T("vendors"), `<button class="btn small" id="addVendor" data-perm="vendors.manage">${ICON.plus}${esc(T("add_vendor"))}</button>`)}
         ${vendors.length ? `<ul class="list-plain">${vendors.map((v) => `<li><span class="grow"><a href="#/vendor/${v.id}"><b>${esc(v.company)}</b></a>${v.trade ? ` <span class="small muted">${esc(v.trade)}</span>` : ""}
           <div class="small muted">${esc([v.contact_name, v.phone, v.email].filter(Boolean).join(" · "))}</div>
           ${v.hourly_rate != null || v.rate_notes ? `<div class="small muted">${esc([v.hourly_rate != null ? `${money(v.hourly_rate)}${T("per_hour")}` : "", v.rate_notes].filter(Boolean).join(" · "))}</div>` : ""}</span>
           ${v.open_tasks ? `<span class="pill">${esc(T("n_tasks", v.open_tasks))}</span>` : ""}${!v.active ? `<span class="pill">${esc(T("inactive_vendor"))}</span>` : ""}
-          <button class="btn ghost small" data-vendor="${v.id}">${esc(T("edit"))}</button></li>`).join("")}</ul>`
+          <button class="btn ghost small" data-perm="vendors.manage" data-vendor="${v.id}">${esc(T("edit"))}</button></li>`).join("")}</ul>`
           : `<p class="small muted">${esc(T("vendors_empty"))}</p>`}</div>
       <div class="panel"><h3>${esc(T("install_title"))}</h3><p class="small muted">${esc(T("install_help"))}</p></div>
-      ${u.is_admin ? `<div class="panel"><h3>${esc(T("reminders"))}</h3><p class="small muted">${esc(T("reminders_help"))}</p>
-        <div class="actions"><button class="btn small" id="testmail">${esc(T("test_mail"))}</button><button class="btn small" id="prev">${esc(T("preview"))}</button><button class="btn small" id="send">${esc(T("send_now"))}</button></div>
+      ${manage || u.is_admin ? `<div class="panel"><h3>${esc(T("reminders"))}</h3><p class="small muted">${esc(T("reminders_help"))}</p>
+        <div class="actions">${u.is_admin ? `<button class="btn small" id="testmail">${esc(T("test_mail"))}</button>` : ""}${manage ? `<button class="btn small" id="prev">${esc(T("preview"))}</button>` : ""}${u.is_admin ? `<button class="btn small" id="send">${esc(T("send_now"))}</button>` : ""}</div>
         <pre id="remout" class="small" style="white-space:pre-wrap;margin:12px 0 0"></pre></div>` : ""}
     </div></div>`;
   $("#logout").onclick = logout;
@@ -1437,26 +1617,78 @@ async function pageSettings(main) {
       setLang(state.user.lang); shellRendered = false; toast(T("saved")); render();
     } catch (err) { fail(err); }
   };
-  const userFields = (isNew) => [
+  $("#groupSel")?.addEventListener("change", async (e) => {
+    try {
+      await api("/api/me/group", { method: "POST", body: { group_id: Number(e.target.value) } });
+      state.user = null; state.users = []; state.vendors = []; state.assetFilter = null; localStorage.removeItem("tm_asset");
+      shellRendered = false; render();
+    } catch (err) { fail(err); }
+  });
+  $("#renameGroup")?.addEventListener("click", () => openForm({
+    title: T("rename"), fields: [{ name: "name", label: T("group_name"), required: true }], values: { name: u.group.name },
+    onSubmit: async (v) => { await api("/api/group", { method: "PATCH", body: v }); state.user = null; shellRendered = false; toast(T("saved")); render(); },
+  }));
+
+  // ---- members
+  // the Owner role can only be given by the owner (that is "hand over the group", below)
+  const roleOptions = (current) => roles.filter((r) => !r.locked || r.id === current).map((r) => [r.id, r.name]);
+  const defaultRole = roles.find((r) => r.key === "creator")?.id;
+  const userFields = (isNew, x) => [
     { name: "name", label: T("name"), required: true },
     ...(isNew ? [{ name: "email", label: T("email"), type: "email", required: true }] : []),
+    { name: "role_id", label: T("role"), type: "select", numeric: true, options: roleOptions(x?.role_id) },
     { name: "password", label: isNew ? T("password") : T("new_password"), type: "password", required: isNew, autocomplete: "new-password" },
     { name: "lang", label: T("language"), type: "select", options: [["no", "Norsk"], ["en", "English"]] },
-    { name: "is_admin", label: T("admin"), type: "checkbox" },
   ];
   $("#addUser")?.addEventListener("click", () => openForm({
-    title: T("add_user"), fields: userFields(true), values: { lang: state.lang },
+    title: T("add_user"), fields: userFields(true), values: { lang: state.lang, role_id: defaultRole },
+    intro: `<p class="small muted">${esc(T("add_user_help"))}</p>`,
     onSubmit: async (v) => { await api("/api/users", { method: "POST", body: v }); state.users = []; toast(T("saved")); render(); },
   }));
+  $("#invite")?.addEventListener("click", () => inviteDialog(roles, defaultRole));
   $$("[data-user]", main).forEach((b) => b.onclick = () => {
     const x = users.find((y) => y.id === Number(b.dataset.user));
-    openForm({
-      title: x.name, fields: userFields(false), values: x,
-      onSubmit: async (v) => { if (!v.password) delete v.password; await api(`/api/users/${x.id}`, { method: "PATCH", body: v }); toast(T("saved")); render(); },
-      onDelete: x.id === u.id ? null : async () => { await api(`/api/users/${x.id}`, { method: "DELETE" }); state.users = []; render(); },
+    const isOwnerRow = x.role_key === "owner";
+    const fields = userFields(false, x).filter((f) => !(isOwnerRow && f.name === "role_id"));
+    const back = openForm({
+      title: x.name, fields, values: x,
+      outro: (x.id !== u.id ? `<div class="field"><button type="button" class="btn small" id="resetLink">${esc(T("reset_link_btn"))}</button>
+        <p class="small muted" style="margin:6px 0 0">${esc(T("reset_link_help"))}</p></div>` : "")
+        + (u.is_owner && x.id !== u.id ? `<div class="field"><button type="button" class="btn small" id="makeOwner">${esc(T("make_owner"))}</button>
+        <p class="small muted" style="margin:6px 0 0">${esc(T("make_owner_help", x.name))}</p></div>` : ""),
+      onSubmit: async (v) => { if (!v.password) delete v.password; await api(`/api/users/${x.id}`, { method: "PATCH", body: v }); state.users = []; toast(T("saved")); render(); },
+      onDelete: x.id === u.id || isOwnerRow ? null : async () => { await api(`/api/users/${x.id}`, { method: "DELETE" }); state.users = []; render(); },
+    });
+    $("#resetLink", back)?.addEventListener("click", async () => {
+      try {
+        const r = await api(`/api/users/${x.id}/reset-link`, { method: "POST" });
+        const m = modal({
+          title: T("reset_link_btn"),
+          html: `<p>${esc(T("reset_link_ready", x.name, r.hours))}</p>
+            <label class="field"><span>${esc(T("reset_link_label"))}</span><input readonly value="${esc(r.link)}" id="rLink"></label>`,
+          footer: `<button class="btn" data-close>${esc(T("close"))}</button><button class="btn primary" id="copyR">${esc(T("copy_link"))}</button>`,
+        });
+        $("#copyR", m).onclick = () => copyText(r.link);
+        $("#rLink", m).onfocus = (e) => e.target.select();
+      } catch (e) { fail(e); }
+    });
+    $("#makeOwner", back)?.addEventListener("click", async () => {
+      if (!confirm(T("make_owner_help", x.name))) return;
+      try { await api("/api/group/transfer-owner", { method: "POST", body: { user_id: x.id } }); closeModal(); state.user = null; shellRendered = false; toast(T("saved")); render(); }
+      catch (e) { fail(e); }
     });
   });
-  $("#addVendor").onclick = () => vendorForm(null);
+  $$("[data-copy]", main).forEach((b) => b.onclick = () => copyText(b.dataset.copy));
+  $$("[data-uninvite]", main).forEach((b) => b.onclick = async () => {
+    if (!confirm(T("cancel_invite"))) return;
+    try { await api(`/api/invitations/${b.dataset.uninvite}`, { method: "DELETE" }); render(); } catch (e) { fail(e); }
+  });
+
+  // ---- roles
+  $("#addRole")?.addEventListener("click", () => roleDialog(null));
+  $$("[data-role]", main).forEach((b) => b.onclick = () => roleDialog(roles.find((r) => r.id === Number(b.dataset.role))));
+
+  $("#addVendor")?.addEventListener("click", () => vendorForm(null));
   $$("[data-vendor]", main).forEach((b) => b.onclick = () => vendorForm(vendors.find((v) => v.id === Number(b.dataset.vendor))));
   const out = $("#remout");
   $("#prev")?.addEventListener("click", async () => {
@@ -1478,6 +1710,78 @@ async function pageSettings(main) {
       out.textContent = r.ok ? `✓ ${T("test_ok")} ${r.to}` : `✗ ${r.error}`;
       toast(r.ok ? T("test_ok") : r.error, !r.ok);
     } catch (e) { fail(e); }
+  });
+}
+
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); toast(T("link_copied")); }
+  catch { prompt(T("copy_link"), text); }  // http on a phone: no clipboard API, let them copy by hand
+}
+
+function inviteDialog(roles, defaultRole) {
+  const fields = [
+    { name: "email", label: T("email"), type: "email", required: true },
+    { name: "role_id", label: T("role"), type: "select", numeric: true, options: roles.filter((r) => !r.locked).map((r) => [r.id, r.name]) },
+    { name: "lang", label: T("invite_language"), type: "select", options: [["no", "Norsk"], ["en", "English"]] },
+  ];
+  openForm({
+    title: T("invite"), fields, values: { role_id: defaultRole, lang: state.lang }, submitLabel: T("send_invite"),
+    intro: `<p class="small muted">${esc(T("invite_help"))}</p>`,
+    onSubmit: async (v) => {
+      const inv = await api("/api/invitations", { method: "POST", body: v });
+      setTimeout(() => {
+        const back = modal({
+          title: T("invite"),
+          html: `<p>${esc(inv.mailed ? T("invite_mailed", inv.email) : T("invite_not_mailed"))}</p>
+            ${inv.mail_error && !inv.mailed ? `<p class="small muted">${esc(inv.mail_error)}</p>` : ""}
+            <label class="field"><span>${esc(T("invite_link"))}</span><input readonly value="${esc(inv.link)}" id="invLink"></label>`,
+          footer: `<button class="btn" data-close>${esc(T("close"))}</button><button class="btn primary" id="copyInv">${esc(T("copy_link"))}</button>`,
+        });
+        $("#copyInv", back).onclick = () => copyText(inv.link);
+        $("#invLink", back).onfocus = (e) => e.target.select();
+        back.addEventListener("click", (e) => { if (e.target.closest("[data-close]") || e.target === back) render(); });
+      }, 50);
+    },
+  });
+}
+
+// Role editor: a name and one tick per permission. Owner is shown but locked.
+async function roleDialog(role) {
+  let catalog;
+  try { catalog = await api("/api/permissions"); } catch (e) { return fail(e); }
+  const editable = can("roles.manage") && !role?.locked;
+  const have = new Set(role?.locked ? catalog.map((p) => p.key) : role?.permissions || []);
+  // group the ticks by what they are about: assets.*, tasks.* ...
+  const AREAS = [["assets", "components"], ["tasks", "history", "counters"], ["parts", "warranties", "vendors", "attachments", "templates"], ["members", "roles"]];
+  const area = (k) => AREAS.findIndex((a) => a.includes(k.split(".")[0]));
+  const ticks = AREAS.map((_, i) => `<div class="perm-group">${catalog.filter((p) => area(p.key) === i).map((p) =>
+    `<label class="check"><input type="checkbox" name="perm" value="${esc(p.key)}" ${have.has(p.key) ? "checked" : ""} ${editable ? "" : "disabled"}><span>${esc(p.label)}</span></label>`).join("")}</div>`).join("");
+  const back = modal({
+    title: role ? role.name : T("new_role"),
+    html: `<form id="roleForm" novalidate>
+      ${fieldHtml({ name: "name", label: T("role_name"), required: true }, role?.name || "")}
+      ${role?.locked ? `<p class="small muted">${esc(T("owner_locked"))}</p>` : ""}
+      ${!role || role.key ? "" : `<p class="small muted">${esc(T("n_members", role.members))}</p>`}
+      <div class="field"><span class="form-sub">${esc(T("permissions"))}</span>
+        <p class="small muted" style="margin:0 0 8px">${esc(T("permissions_help"))}</p>${ticks}</div></form>`,
+    footer: editable
+      ? `${role && !role.builtin ? `<button class="btn danger left" data-del type="button">${esc(T("delete"))}</button>` : ""}
+         <button class="btn" data-close type="button">${esc(T("cancel"))}</button><button class="btn primary" data-ok type="button">${esc(T("save"))}</button>`
+      : `<button class="btn" data-close type="button">${esc(T("close"))}</button>`,
+  });
+  const nameInput = $('[name="name"]', back);
+  if (!editable) nameInput.disabled = true;
+  $("[data-ok]", back)?.addEventListener("click", async () => {
+    const body = { name: nameInput.value.trim(), permissions: $$('input[name="perm"]:checked', back).map((i) => i.value) };
+    if (!body.name) { toast(`${T("role_name")}?`, true); nameInput.focus(); return; }
+    try {
+      await api(role ? `/api/roles/${role.id}` : "/api/roles", { method: role ? "PUT" : "POST", body });
+      closeModal(); state.user = null; toast(T("saved")); render();
+    } catch (e) { fail(e); }
+  });
+  $("[data-del]", back)?.addEventListener("click", async () => {
+    if (!confirm(T("delete_role_confirm"))) return;
+    try { await api(`/api/roles/${role.id}`, { method: "DELETE" }); closeModal(); toast(T("deleted")); render(); } catch (e) { fail(e); }
   });
 }
 

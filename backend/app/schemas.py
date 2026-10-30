@@ -20,6 +20,12 @@ class SetupIn(BaseModel):
     email: str = Field(min_length=3, max_length=200)
     password: str = Field(min_length=6, max_length=200)
     lang: Lang = "en"
+    group_name: Optional[str] = Field(default=None, max_length=100)  # "Family" when left empty
+
+
+class SignupIn(SetupIn):
+    group_name: str = Field(min_length=1, max_length=100)
+    code: str
 
 
 class LoginIn(BaseModel):
@@ -28,7 +34,8 @@ class LoginIn(BaseModel):
 
 
 class UserCreate(SetupIn):
-    is_admin: bool = False
+    role_id: Optional[int] = None  # default: Creator
+    is_admin: Optional[bool] = None  # older app versions: True = Admin role
 
 
 class UserUpdate(BaseModel):
@@ -36,7 +43,8 @@ class UserUpdate(BaseModel):
     lang: Optional[Lang] = None
     email_reminders: Optional[bool] = None
     password: Optional[str] = Field(default=None, min_length=6)
-    is_admin: Optional[bool] = None
+    is_admin: Optional[bool] = None  # older app versions; use role_id
+    role_id: Optional[int] = None
 
 
 class UserOut(ORM):
@@ -51,6 +59,78 @@ class UserOut(ORM):
 class TokenOut(BaseModel):
     token: str
     user: UserOut
+
+
+# ---------- groups, members, roles, invitations ----------
+class MemberOut(UserOut):
+    role_id: int
+    role_name: str
+    role_key: Optional[str] = None
+
+
+class GroupIn(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+
+
+class GroupOut(GroupIn):
+    id: int
+
+
+class SwitchGroupIn(BaseModel):
+    group_id: int
+
+
+class TransferIn(BaseModel):
+    user_id: int
+
+
+class RoleIn(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    permissions: list[str] = []
+
+
+class RoleOut(BaseModel):
+    id: int
+    key: Optional[str] = None
+    name: str
+    permissions: list[str]
+    members: int = 0
+    locked: bool = False   # Owner: always every permission
+    builtin: bool = False  # built-in roles can't be deleted
+
+
+class InvitationIn(BaseModel):
+    email: str = Field(min_length=3, max_length=200)
+    role_id: Optional[int] = None
+    lang: Optional[Lang] = None  # language of the e-mail; default: yours
+
+
+class InvitationOut(BaseModel):
+    id: int
+    email: str
+    role_id: int
+    role_name: str
+    link: str
+    expires_at: datetime
+    created_at: datetime
+    invited_by_name: Optional[str] = None
+    mailed: bool = False
+    mail_error: Optional[str] = None
+
+
+class ForgotIn(BaseModel):
+    email: str = Field(min_length=3, max_length=200)
+    lang: Optional[Lang] = None  # language of the e-mail; default: the user's own
+
+
+class ResetIn(BaseModel):
+    password: str = Field(min_length=6, max_length=200)
+
+
+class AcceptIn(BaseModel):
+    name: Optional[str] = Field(default=None, max_length=100)  # only for a new account
+    password: str = Field(min_length=6, max_length=200)
+    lang: Lang = "en"
 
 
 # ---------- assets / components ----------

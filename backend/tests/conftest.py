@@ -50,8 +50,8 @@ class Api:
         assert r.status_code == expect, f"{r.request.method} {r.request.url} -> {r.status_code}: {r.text}"
         return r.json() if r.headers.get("content-type", "").startswith("application/json") else r
 
-    def get(self, path, expect=200, **kw):
-        return self._check(self.c.get(path, headers=self.h, **kw), expect)
+    def get(self, path, expect=200, headers=None, **kw):
+        return self._check(self.c.get(path, headers={**self.h, **(headers or {})}, **kw), expect)
 
     def post(self, path, json=None, expect=200, **kw):
         return self._check(self.c.post(path, json=json, headers=self.h, **kw), expect)

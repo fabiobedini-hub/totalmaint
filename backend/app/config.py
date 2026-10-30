@@ -57,3 +57,9 @@ SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER)
 REMINDER_HOUR = int(os.getenv("REMINDER_HOUR", "7"))  # local hour for the daily reminder run
 
 FRONTEND_DIR = Path(os.getenv("FRONTEND_DIR", PROJECT_DIR / "frontend"))
+
+# Groups: anyone with this code can sign up and create their own group (household, boat club ...).
+# Empty = sign-up is closed; people only get in through an invitation from a group admin.
+SIGNUP_CODE = os.getenv("SIGNUP_CODE", "").strip()
+INVITE_DAYS = int(os.getenv("INVITE_DAYS", "14"))  # how long an invitation link works
+RESET_HOURS = int(os.getenv("RESET_HOURS", "2"))    # how long a "forgot password" link works

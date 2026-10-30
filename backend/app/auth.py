@@ -32,6 +32,7 @@ def new_ical_token() -> str:
 def create_token(user: User) -> str:
     payload = {
         "sub": str(user.id),
+        "v": user.session_version or 0,
         "exp": datetime.now(timezone.utc) + timedelta(hours=TOKEN_HOURS),
     }
     return jwt.encode(payload, SECRET_KEY, algorithm="HS256")
@@ -50,6 +51,8 @@ def current_user(
     user = db.get(User, int(payload["sub"]))
     if user is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User no longer exists")
+    if payload.get("v", 0) != (user.session_version or 0):  # logged in before the password was reset
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Session expired, please log in again")
     return user
 
 

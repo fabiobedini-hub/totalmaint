@@ -45,7 +45,9 @@ def ical_feed(token: str, db: Session = Depends(get_db)):
         raise HTTPException(404, "Unknown calendar")
     no = user.lang == "no"
     today = date.today()
-    events = calendar_events(db, today - timedelta(days=60), today + timedelta(days=365), user.id)
+    group_ids = list(db.scalars(select(m.Membership.group_id).where(m.Membership.user_id == user.id)))
+    events = calendar_events(db, today - timedelta(days=60), today + timedelta(days=365), user.id,
+                             group_ids=group_ids)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
     lines = [

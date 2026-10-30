@@ -10,11 +10,16 @@ Warranty     = warranties with an end date (shown in the calendar)
 Attachment   = files (receipts, manuals, photos) linked to any of the above
 CounterReading = km / engine-hour readings of an asset (the latest one is the current value)
 Vendor       = craftsmen and companies a task can be handed to (contact data, rate)
+
+Group        = a household / club that owns things; every asset and vendor belongs to one group
+Role         = a named set of permissions inside a group (Owner, Admin, Creator, Viewer + own ones)
+Membership   = user X is in group Y with role Z (one person can be in several groups)
+Invitation   = an e-mailed one-time link that adds someone to a group with a role
 """
 from datetime import date, datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -30,13 +35,91 @@ class User(Base):
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     email_reminders: Mapped[bool] = mapped_column(Boolean, default=True)
     ical_token: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    # the group the app shows; None = the first group the user is a member of
+    current_group_id: Mapped[Optional[int]] = mapped_column(ForeignKey("groups.id", ondelete="SET NULL"), nullable=True)
+    # goes up by one when the password is reset: log-ins (tokens) made before that stop working
+    session_version: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class Group(Base):
+    __tablename__ = "groups"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    roles: Mapped[list["Role"]] = relationship(back_populates="group", cascade="all, delete-orphan",
+                                               order_by="Role.id")
+    memberships: Mapped[list["Membership"]] = relationship(back_populates="group", cascade="all, delete-orphan")
+
+
+class Role(Base):
+    """key is "owner", "admin", "creator" or "viewer" for the built-in roles, None for roles the admin made.
+    permissions: comma-separated keys from permissions.PERMISSIONS (Owner always has all of them)."""
+    __tablename__ = "roles"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), index=True)
+    key: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    name: Mapped[str] = mapped_column(String(60))
+    permissions: Mapped[str] = mapped_column(Text, default="")
+
+    group: Mapped[Group] = relationship(back_populates="roles")
+
+    @property
+    def perm_set(self) -> set[str]:
+        return {p for p in (self.permissions or "").split(",") if p}
+
+
+class Membership(Base):
+    __tablename__ = "memberships"
+    __table_args__ = (UniqueConstraint("user_id", "group_id"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), index=True)
+    role_id: Mapped[int] = mapped_column(ForeignKey("roles.id"))
+    joined_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    user: Mapped[User] = relationship()
+    group: Mapped[Group] = relationship(back_populates="memberships")
+    role: Mapped[Role] = relationship()
+
+
+class PasswordReset(Base):
+    """A "forgot password" link. Only a hash of the token is stored, so a copy of the database can't be used to log in."""
+    __tablename__ = "password_resets"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_by_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    user: Mapped[User] = relationship(foreign_keys=[user_id])
+
+
+class Invitation(Base):
+    __tablename__ = "invitations"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), index=True)
+    email: Mapped[str] = mapped_column(String(200))
+    role_id: Mapped[int] = mapped_column(ForeignKey("roles.id", ondelete="CASCADE"))
+    token: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    invited_by_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    accepted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    group: Mapped[Group] = relationship()
+    role: Mapped[Role] = relationship()
+    invited_by: Mapped[Optional[User]] = relationship()
 
 
 class Vendor(Base):
     """A company or craftsman that can be given a task (plumber, boatyard, car workshop ...)."""
     __tablename__ = "vendors"
     id: Mapped[int] = mapped_column(primary_key=True)
+    group_id: Mapped[Optional[int]] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), nullable=True, index=True)
     company: Mapped[str] = mapped_column(String(150))
     contact_name: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
     trade: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)  # plumber, electrician ...
@@ -55,6 +138,7 @@ class Vendor(Base):
 class Asset(Base):
     __tablename__ = "assets"
     id: Mapped[int] = mapped_column(primary_key=True)
+    group_id: Mapped[Optional[int]] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(150))
     kind: Mapped[str] = mapped_column(String(30), default="home")  # home, car, boat, cabin, bicycle, motorcycle, scooter, other
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

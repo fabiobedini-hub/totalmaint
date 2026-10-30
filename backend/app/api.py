@@ -1,6 +1,8 @@
+import hashlib
 import mimetypes
+import secrets
 import uuid
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -11,13 +13,15 @@ from sqlalchemy.orm import Session
 
 from . import models as m
 from . import schemas as s
-from .auth import (admin_user, create_token, current_user, hash_password, new_ical_token,
-                   verify_password)
-from .config import MAX_UPLOAD_MB, PUBLIC_URL, UPLOAD_DIR
+from .auth import create_token, current_user, hash_password, new_ical_token, verify_password
+from .config import INVITE_DAYS, MAX_UPLOAD_MB, PUBLIC_URL, RESET_HOURS, SIGNUP_CODE, SMTP_HOST, UPLOAD_DIR
 from .db import get_db
 from .recurrence import add_interval, next_counter_after_completion, next_due_after_completion
 from .services import (asset_total_cost, calendar_events, completion_out, part_out, task_out,
                        task_status, warranty_out)
+from .permissions import (ALL, PERMISSIONS, Ctx, clean, group_asset_ids, group_ctx, memberships_of, new_group,
+                          require)
+from .reminders import send_invitation, send_password_reset
 from .templates_data import find_template, list_templates
 
 router = APIRouter(prefix="/api")
@@ -28,6 +32,32 @@ def _get_or_404(db: Session, model, obj_id: int):
     if obj is None:
         raise HTTPException(404, f"{model.__name__} {obj_id} not found")
     return obj
+
+
+def _asset(db: Session, ctx: Ctx, asset_id: int) -> m.Asset:
+    """An asset of the active group; other groups' things simply don't exist (404)."""
+    a = db.get(m.Asset, asset_id)
+    if a is None or a.group_id != ctx.group.id:
+        raise HTTPException(404, f"Asset {asset_id} not found")
+    return a
+
+
+def _owner_asset(db: Session, obj):
+    if isinstance(obj, m.Asset):
+        return obj
+    if isinstance(obj, m.Completion):
+        return obj.task.asset
+    return db.get(m.Asset, obj.asset_id)
+
+
+def _mine(db: Session, ctx: Ctx, model, obj_id: int):
+    """Get a row of the active group (through its asset, or directly for vendors) or 404."""
+    obj = db.get(model, obj_id)
+    if obj is not None:
+        gid = obj.group_id if isinstance(obj, m.Vendor) else getattr(_owner_asset(db, obj), "group_id", None)
+        if gid == ctx.group.id:
+            return obj
+    raise HTTPException(404, f"{model.__name__} {obj_id} not found")
 
 
 def _delete_files(db: Session, entity_type: str, entity_id: int) -> None:
@@ -45,10 +75,18 @@ def _record_reading(db: Session, asset: m.Asset, value: float, on: date, user_id
         asset.counter_on = on
 
 
-def _check_refs(db: Session, body: s.TaskIn) -> None:
-    if body.vendor_id is not None and db.get(m.Vendor, body.vendor_id) is None:
+def _check_vendor(db: Session, ctx: Ctx, vendor_id: Optional[int]) -> None:
+    if vendor_id is None:
+        return
+    v = db.get(m.Vendor, vendor_id)
+    if v is None or v.group_id != ctx.group.id:
         raise HTTPException(400, "Vendor not found")
-    if body.assigned_to_id is not None and db.get(m.User, body.assigned_to_id) is None:
+
+
+def _check_refs(db: Session, ctx: Ctx, body: s.TaskIn) -> None:
+    _check_vendor(db, ctx, body.vendor_id)
+    if body.assigned_to_id is not None and db.scalar(select(m.Membership.id).where(
+            m.Membership.group_id == ctx.group.id, m.Membership.user_id == body.assigned_to_id)) is None:
         raise HTTPException(400, "User not found")
 
 
@@ -61,23 +99,48 @@ def _check_component(db: Session, asset_id: int, component_id: Optional[int]) ->
 
 
 # =============================== auth & users ===============================
+def _token_out(db: Session, user: m.User) -> s.TokenOut:
+    return s.TokenOut(token=create_token(user), user=s.UserOut.model_validate(user))
+
+
 @router.get("/auth/status")
 def auth_status(db: Session = Depends(get_db)):
     has_users = db.scalar(select(func.count(m.User.id))) > 0
-    return {"needs_setup": not has_users}
+    return {"needs_setup": not has_users, "signup_enabled": bool(SIGNUP_CODE)}
 
 
 @router.post("/auth/setup", response_model=s.TokenOut)
 def first_setup(body: s.SetupIn, db: Session = Depends(get_db)):
-    """Creates the first (admin) user. Only works while the database has no users."""
+    """Creates the first (admin) user and their group. Only works while the database has no users."""
     if db.scalar(select(func.count(m.User.id))) > 0:
         raise HTTPException(400, "Setup already done")
     user = m.User(name=body.name, email=body.email.lower().strip(), lang=body.lang,
                   password_hash=hash_password(body.password), is_admin=True,
                   ical_token=new_ical_token())
     db.add(user)
+    db.flush()
+    new_group(db, body.group_name or ("Familien" if body.lang == "no" else "Family"), user)
     db.commit()
-    return s.TokenOut(token=create_token(user), user=s.UserOut.model_validate(user))
+    return _token_out(db, user)
+
+
+@router.post("/auth/signup", response_model=s.TokenOut)
+def signup(body: s.SignupIn, db: Session = Depends(get_db)):
+    """A new person with the sign-up code: their own account and their own group, as owner."""
+    if not SIGNUP_CODE:
+        raise HTTPException(403, "Sign-up is closed; ask for an invitation")
+    if not secrets.compare_digest(body.code.strip(), SIGNUP_CODE):
+        raise HTTPException(403, "Wrong sign-up code")
+    email = body.email.lower().strip()
+    if db.scalar(select(m.User).where(m.User.email == email)):
+        raise HTTPException(400, "E-mail already in use")
+    user = m.User(name=body.name, email=email, lang=body.lang, password_hash=hash_password(body.password),
+                  ical_token=new_ical_token())
+    db.add(user)
+    db.flush()
+    new_group(db, body.group_name, user)
+    db.commit()
+    return _token_out(db, user)
 
 
 @router.post("/auth/login", response_model=s.TokenOut)
@@ -85,13 +148,20 @@ def login(body: s.LoginIn, db: Session = Depends(get_db)):
     user = db.scalar(select(m.User).where(m.User.email == body.email.lower().strip()))
     if user is None or not verify_password(body.password, user.password_hash):
         raise HTTPException(401, "Wrong e-mail or password")
-    return s.TokenOut(token=create_token(user), user=s.UserOut.model_validate(user))
+    return _token_out(db, user)
 
 
 @router.get("/me")
-def me(user: m.User = Depends(current_user)):
+def me(ctx: Ctx = Depends(group_ctx), db: Session = Depends(get_db)):
+    user = ctx.user
     out = s.UserOut.model_validate(user).model_dump()
     out["ical_url"] = f"{PUBLIC_URL}/ical/{user.ical_token}.ics"
+    out["group"] = {"id": ctx.group.id, "name": ctx.group.name}
+    out["role"] = {"id": ctx.membership.role.id, "key": ctx.membership.role.key, "name": ctx.membership.role.name}
+    out["permissions"] = ALL if ctx.is_owner else sorted(ctx.perms, key=ALL.index)
+    out["is_owner"] = ctx.is_owner
+    out["groups"] = [{"id": x.group_id, "name": x.group.name, "role": x.role.name}
+                     for x in memberships_of(db, user.id)]
     return out
 
 
@@ -110,6 +180,16 @@ def update_me(body: s.UserUpdate, user: m.User = Depends(current_user), db: Sess
     return user
 
 
+@router.post("/me/group")
+def switch_group(body: s.SwitchGroupIn, user: m.User = Depends(current_user), db: Session = Depends(get_db)):
+    """Choose which of your groups the app shows."""
+    if not any(x.group_id == body.group_id for x in memberships_of(db, user.id)):
+        raise HTTPException(404, "You are not a member of that group")
+    user.current_group_id = body.group_id
+    db.commit()
+    return {"ok": True}
+
+
 @router.post("/me/ical-reset")
 def reset_ical(user: m.User = Depends(current_user), db: Session = Depends(get_db)):
     user.ical_token = new_ical_token()
@@ -118,53 +198,374 @@ def reset_ical(user: m.User = Depends(current_user), db: Session = Depends(get_d
     return {"ical_url": f"{PUBLIC_URL}/ical/{user.ical_token}.ics"}
 
 
-@router.get("/users", response_model=list[s.UserOut])
-def list_users(_: m.User = Depends(current_user), db: Session = Depends(get_db)):
-    return db.scalars(select(m.User).order_by(m.User.name)).all()
+# =============================== forgotten password ===============================
+def _hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-@router.post("/users", response_model=s.UserOut)
-def create_user(body: s.UserCreate, _: m.User = Depends(admin_user), db: Session = Depends(get_db)):
+def _new_reset(db: Session, user: m.User, by: Optional[m.User] = None) -> str:
+    """Creates a one-time link; earlier unused links of the same user stop working."""
+    now = datetime.utcnow()
+    for old in db.scalars(select(m.PasswordReset).where(m.PasswordReset.user_id == user.id,
+                                                        m.PasswordReset.used_at.is_(None))):
+        old.used_at = now
+    token = secrets.token_urlsafe(32)
+    db.add(m.PasswordReset(user_id=user.id, token_hash=_hash(token), created_by_id=by.id if by else None,
+                           expires_at=now + timedelta(hours=RESET_HOURS)))
+    db.commit()
+    return f"{PUBLIC_URL}/#/reset/{token}"
+
+
+def _open_reset(db: Session, token: str) -> m.PasswordReset:
+    r = db.scalar(select(m.PasswordReset).where(m.PasswordReset.token_hash == _hash(token)))
+    if r is None or r.used_at is not None:
+        raise HTTPException(404, "This link is no longer valid; ask for a new one")
+    if r.expires_at < datetime.utcnow():
+        raise HTTPException(410, "This link has expired; ask for a new one")
+    return r
+
+
+@router.post("/auth/forgot")
+def forgot_password(body: s.ForgotIn, db: Session = Depends(get_db)):
+    """E-mails a reset link. The answer is the same whether the address exists or not,
+    so the page can't be used to find out who has an account."""
+    user = db.scalar(select(m.User).where(m.User.email == body.email.lower().strip()))
+    if user is not None and SMTP_HOST:
+        recent = db.scalar(select(func.count(m.PasswordReset.id)).where(
+            m.PasswordReset.user_id == user.id,
+            m.PasswordReset.created_at >= datetime.utcnow() - timedelta(hours=1))) or 0
+        if recent < 3:  # don't let anyone flood a mailbox
+            send_password_reset(user, _new_reset(db, user), RESET_HOURS, body.lang)
+    return {"ok": True, "mail_enabled": bool(SMTP_HOST)}
+
+
+@router.get("/auth/reset/{token}")
+def reset_info(token: str, db: Session = Depends(get_db)):
+    r = _open_reset(db, token)
+    return {"email": r.user.email, "name": r.user.name}
+
+
+@router.post("/auth/reset/{token}", response_model=s.TokenOut)
+def reset_password(token: str, body: s.ResetIn, db: Session = Depends(get_db)):
+    """Sets the new password, logs out every other device, and logs this one in."""
+    r = _open_reset(db, token)
+    user = r.user
+    user.password_hash = hash_password(body.password)
+    user.session_version = (user.session_version or 0) + 1
+    r.used_at = datetime.utcnow()
+    db.commit()
+    return _token_out(db, user)
+
+
+@router.post("/users/{user_id}/reset-link")
+def admin_reset_link(user_id: int, ctx: Ctx = Depends(require("members.manage")), db: Session = Depends(get_db)):
+    """For a member who forgot their password when the server can't send e-mail: a link to hand over."""
+    mem = _membership(db, ctx, user_id)
+    if mem.role.key == "owner" and not ctx.is_owner:
+        raise HTTPException(403, "Only the owner can do this for the owner")
+    if len(memberships_of(db, user_id)) > 1 and user_id != ctx.user.id:
+        raise HTTPException(403, "This person is also in another group; they use \"Forgot password\" themselves")
+    return {"link": _new_reset(db, mem.user, ctx.user), "hours": RESET_HOURS}
+
+
+# =============================== group, members ===============================
+def _member_out(mem: m.Membership) -> s.MemberOut:
+    u = mem.user
+    return s.MemberOut(id=u.id, name=u.name, email=u.email, lang=u.lang, is_admin=u.is_admin,
+                       email_reminders=u.email_reminders, role_id=mem.role_id, role_name=mem.role.name,
+                       role_key=mem.role.key)
+
+
+def _membership(db: Session, ctx: Ctx, user_id: int) -> m.Membership:
+    mem = db.scalar(select(m.Membership).where(m.Membership.group_id == ctx.group.id,
+                                               m.Membership.user_id == user_id))
+    if mem is None:
+        raise HTTPException(404, "Not a member of this group")
+    return mem
+
+
+def _role(db: Session, ctx: Ctx, role_id: Optional[int], default_key: str = "creator") -> m.Role:
+    if role_id is None:
+        role = db.scalar(select(m.Role).where(m.Role.group_id == ctx.group.id, m.Role.key == default_key))
+    else:
+        role = db.get(m.Role, role_id)
+    if role is None or role.group_id != ctx.group.id:
+        raise HTTPException(400, "Role not found")
+    if role.key == "owner" and not ctx.is_owner:
+        raise HTTPException(403, "Only the owner can make someone owner")
+    return role
+
+
+def _legacy_role_id(db: Session, ctx: Ctx, body) -> Optional[int]:
+    """Older app versions send is_admin instead of a role."""
+    if getattr(body, "role_id", None) is not None or getattr(body, "is_admin", None) is None:
+        return getattr(body, "role_id", None)
+    key = "admin" if body.is_admin else "creator"
+    return db.scalar(select(m.Role.id).where(m.Role.group_id == ctx.group.id, m.Role.key == key))
+
+
+def _owner_count(db: Session, group_id: int) -> int:
+    return db.scalar(select(func.count(m.Membership.id)).join(m.Role)
+                     .where(m.Membership.group_id == group_id, m.Role.key == "owner")) or 0
+
+
+@router.get("/group", response_model=s.GroupOut)
+def get_group(ctx: Ctx = Depends(group_ctx)):
+    return s.GroupOut(id=ctx.group.id, name=ctx.group.name)
+
+
+@router.patch("/group", response_model=s.GroupOut)
+def rename_group(body: s.GroupIn, ctx: Ctx = Depends(require("members.manage")), db: Session = Depends(get_db)):
+    ctx.group.name = body.name
+    db.commit()
+    return s.GroupOut(id=ctx.group.id, name=ctx.group.name)
+
+
+@router.get("/users", response_model=list[s.MemberOut])
+def list_users(ctx: Ctx = Depends(group_ctx), db: Session = Depends(get_db)):
+    """The members of the active group (used for 'responsible person' and the members page)."""
+    mems = db.scalars(select(m.Membership).where(m.Membership.group_id == ctx.group.id)).all()
+    return sorted([_member_out(x) for x in mems], key=lambda x: x.name.lower())
+
+
+@router.post("/users", response_model=s.MemberOut)
+def create_user(body: s.UserCreate, ctx: Ctx = Depends(require("members.manage")), db: Session = Depends(get_db)):
+    """Make an account straight away with a password you hand over (the invitation is the other way)."""
     email = body.email.lower().strip()
     if db.scalar(select(m.User).where(m.User.email == email)):
-        raise HTTPException(400, "E-mail already in use")
-    user = m.User(name=body.name, email=email, lang=body.lang, is_admin=body.is_admin,
-                  password_hash=hash_password(body.password), ical_token=new_ical_token())
+        raise HTTPException(400, "E-mail already in use; send an invitation instead")
+    role = _role(db, ctx, _legacy_role_id(db, ctx, body))
+    user = m.User(name=body.name, email=email, lang=body.lang, password_hash=hash_password(body.password),
+                  ical_token=new_ical_token(), current_group_id=ctx.group.id)
     db.add(user)
+    db.flush()
+    mem = m.Membership(user_id=user.id, group_id=ctx.group.id, role_id=role.id)
+    db.add(mem)
     db.commit()
-    return user
+    db.refresh(mem)
+    return _member_out(mem)
 
 
-@router.patch("/users/{user_id}", response_model=s.UserOut)
-def update_user(user_id: int, body: s.UserUpdate, admin: m.User = Depends(admin_user),
+@router.patch("/users/{user_id}", response_model=s.MemberOut)
+def update_user(user_id: int, body: s.UserUpdate, ctx: Ctx = Depends(require("members.manage")),
                 db: Session = Depends(get_db)):
-    user = _get_or_404(db, m.User, user_id)
-    for field in ("name", "lang", "email_reminders", "is_admin"):
+    mem = _membership(db, ctx, user_id)
+    user = mem.user
+    if mem.role.key == "owner" and not ctx.is_owner:
+        raise HTTPException(403, "Only the owner can change the owner")
+    role_id = _legacy_role_id(db, ctx, body)
+    if role_id is not None and role_id != mem.role_id:
+        role = _role(db, ctx, role_id)
+        if mem.role.key == "owner" and _owner_count(db, ctx.group.id) <= 1:
+            raise HTTPException(400, "The group needs an owner: make someone else owner first")
+        if user.id == ctx.user.id and not ctx.is_owner and not ("members.manage" in role.perm_set):
+            raise HTTPException(400, "You cannot remove your own admin rights")
+        mem.role_id = role.id
+    for field in ("name", "lang", "email_reminders"):
         value = getattr(body, field)
         if value is not None:
             setattr(user, field, value)
     if body.password:
+        # an account in several groups belongs to more than this group: only its own owner changes the password
+        if len(memberships_of(db, user.id)) > 1 and user.id != ctx.user.id:
+            raise HTTPException(403, "This person is also in another group; they change their password themselves")
         user.password_hash = hash_password(body.password)
-    if user.id == admin.id and body.is_admin is False:
-        raise HTTPException(400, "You cannot remove your own admin rights")
     db.commit()
-    return user
+    db.refresh(mem)
+    return _member_out(mem)
 
 
 @router.delete("/users/{user_id}")
-def delete_user(user_id: int, admin: m.User = Depends(admin_user), db: Session = Depends(get_db)):
-    if user_id == admin.id:
+def delete_user(user_id: int, ctx: Ctx = Depends(require("members.manage")), db: Session = Depends(get_db)):
+    """Removes the person from this group. The account itself goes too when it is in no other group."""
+    if user_id == ctx.user.id:
         raise HTTPException(400, "You cannot delete yourself")
-    db.delete(_get_or_404(db, m.User, user_id))
+    mem = _membership(db, ctx, user_id)
+    if mem.role.key == "owner":
+        raise HTTPException(403, "The owner cannot be removed")
+    user = mem.user
+    for t in db.scalars(select(m.Task).where(m.Task.assigned_to_id == user.id,
+                                             m.Task.asset_id.in_(group_asset_ids(db, ctx.group.id)))):
+        t.assigned_to_id = None
+    db.delete(mem)
+    db.flush()
+    if not memberships_of(db, user.id):
+        db.delete(user)
+    elif user.current_group_id == ctx.group.id:
+        user.current_group_id = None
     db.commit()
     return {"ok": True}
 
 
+@router.post("/group/transfer-owner")
+def transfer_owner(body: s.TransferIn, ctx: Ctx = Depends(group_ctx), db: Session = Depends(get_db)):
+    """Owner only: another member becomes owner, you become admin."""
+    if not ctx.is_owner:
+        raise HTTPException(403, "Only the owner can hand over the group")
+    target = _membership(db, ctx, body.user_id)
+    roles = {r.key: r for r in ctx.group.roles}
+    target.role_id = roles["owner"].id
+    ctx.membership.role_id = roles["admin"].id
+    db.commit()
+    return {"ok": True}
+
+
+# =============================== roles ===============================
+def _role_out(db: Session, r: m.Role) -> s.RoleOut:
+    n = db.scalar(select(func.count(m.Membership.id)).where(m.Membership.role_id == r.id)) or 0
+    perms = ALL if r.key == "owner" else sorted(r.perm_set, key=ALL.index)
+    return s.RoleOut(id=r.id, key=r.key, name=r.name, permissions=perms, members=n,
+                     locked=r.key == "owner", builtin=r.key is not None)
+
+
+@router.get("/permissions")
+def permission_catalog(user: m.User = Depends(current_user)):
+    i = 1 if user.lang == "no" else 0
+    return [{"key": k, "label": v[i]} for k, v in PERMISSIONS.items()]
+
+
+@router.get("/roles", response_model=list[s.RoleOut])
+def list_roles(ctx: Ctx = Depends(group_ctx), db: Session = Depends(get_db)):
+    return [_role_out(db, r) for r in ctx.group.roles]
+
+
+@router.post("/roles", response_model=s.RoleOut)
+def create_role(body: s.RoleIn, ctx: Ctx = Depends(require("roles.manage")), db: Session = Depends(get_db)):
+    r = m.Role(group_id=ctx.group.id, key=None, name=body.name, permissions=clean(body.permissions))
+    db.add(r)
+    db.commit()
+    db.refresh(r)
+    return _role_out(db, r)
+
+
+@router.put("/roles/{role_id}", response_model=s.RoleOut)
+def update_role(role_id: int, body: s.RoleIn, ctx: Ctx = Depends(require("roles.manage")),
+                db: Session = Depends(get_db)):
+    r = _get_or_404(db, m.Role, role_id)
+    if r.group_id != ctx.group.id:
+        raise HTTPException(404, "Role not found")
+    if r.key == "owner":
+        raise HTTPException(400, "The owner role is locked")
+    new = clean(body.permissions)
+    # you may not take away your own power to fix roles (the owner can always fix things)
+    if r.id == ctx.membership.role_id and not ctx.is_owner and "roles.manage" not in new.split(","):
+        raise HTTPException(400, "You cannot remove 'Edit roles' from your own role")
+    r.name = body.name
+    r.permissions = new
+    db.commit()
+    return _role_out(db, r)
+
+
+@router.delete("/roles/{role_id}")
+def delete_role(role_id: int, ctx: Ctx = Depends(require("roles.manage")), db: Session = Depends(get_db)):
+    """Own roles only. Members who had it become Viewers."""
+    r = _get_or_404(db, m.Role, role_id)
+    if r.group_id != ctx.group.id:
+        raise HTTPException(404, "Role not found")
+    if r.key is not None:
+        raise HTTPException(400, "Built-in roles cannot be deleted")
+    viewer = db.scalar(select(m.Role).where(m.Role.group_id == ctx.group.id, m.Role.key == "viewer"))
+    for mem in db.scalars(select(m.Membership).where(m.Membership.role_id == r.id)):
+        mem.role_id = viewer.id
+    db.flush()
+    db.delete(r)
+    db.commit()
+    return {"ok": True}
+
+
+# =============================== invitations ===============================
+def _invite_link(inv: m.Invitation) -> str:
+    return f"{PUBLIC_URL}/#/invite/{inv.token}"
+
+
+def _invite_out(inv: m.Invitation) -> s.InvitationOut:
+    return s.InvitationOut(id=inv.id, email=inv.email, role_id=inv.role_id, role_name=inv.role.name,
+                           expires_at=inv.expires_at, created_at=inv.created_at, link=_invite_link(inv),
+                           invited_by_name=inv.invited_by.name if inv.invited_by else None)
+
+
+def _open_invite(db: Session, token: str) -> m.Invitation:
+    inv = db.scalar(select(m.Invitation).where(m.Invitation.token == token))
+    if inv is None or inv.accepted_at is not None:
+        raise HTTPException(404, "This invitation is no longer valid")
+    if inv.expires_at < datetime.utcnow():
+        raise HTTPException(410, "This invitation has expired; ask for a new one")
+    return inv
+
+
+@router.get("/invitations", response_model=list[s.InvitationOut])
+def list_invitations(ctx: Ctx = Depends(require("members.manage")), db: Session = Depends(get_db)):
+    q = select(m.Invitation).where(m.Invitation.group_id == ctx.group.id, m.Invitation.accepted_at.is_(None),
+                                   m.Invitation.expires_at >= datetime.utcnow()).order_by(m.Invitation.created_at.desc())
+    return [_invite_out(i) for i in db.scalars(q)]
+
+
+@router.post("/invitations", response_model=s.InvitationOut)
+def create_invitation(body: s.InvitationIn, ctx: Ctx = Depends(require("members.manage")),
+                      db: Session = Depends(get_db)):
+    """Creates a one-time link and e-mails it when SMTP is set up. The link is always returned, to copy by hand."""
+    email = body.email.lower().strip()
+    existing = db.scalar(select(m.User).where(m.User.email == email))
+    if existing and any(x.group_id == ctx.group.id for x in memberships_of(db, existing.id)):
+        raise HTTPException(400, "Already a member of this group")
+    role = _role(db, ctx, body.role_id)
+    inv = m.Invitation(group_id=ctx.group.id, email=email, role_id=role.id, token=secrets.token_urlsafe(32),
+                       invited_by_id=ctx.user.id, expires_at=datetime.utcnow() + timedelta(days=INVITE_DAYS))
+    db.add(inv)
+    db.commit()
+    db.refresh(inv)
+    out = _invite_out(inv)
+    out.mailed, out.mail_error = send_invitation(inv, body.lang or ctx.user.lang)
+    return out
+
+
+@router.delete("/invitations/{invitation_id}")
+def cancel_invitation(invitation_id: int, ctx: Ctx = Depends(require("members.manage")),
+                      db: Session = Depends(get_db)):
+    inv = _get_or_404(db, m.Invitation, invitation_id)
+    if inv.group_id != ctx.group.id:
+        raise HTTPException(404, "Invitation not found")
+    db.delete(inv)
+    db.commit()
+    return {"ok": True}
+
+
+@router.get("/invite/{token}")
+def invitation_info(token: str, db: Session = Depends(get_db)):
+    """Public: what the invitation page shows before someone accepts."""
+    inv = _open_invite(db, token)
+    has_account = db.scalar(select(m.User.id).where(m.User.email == inv.email)) is not None
+    return {"group_name": inv.group.name, "email": inv.email, "role_name": inv.role.name,
+            "invited_by": inv.invited_by.name if inv.invited_by else None, "has_account": has_account}
+
+
+@router.post("/invite/{token}/accept", response_model=s.TokenOut)
+def accept_invitation(token: str, body: s.AcceptIn, db: Session = Depends(get_db)):
+    """New person: name + password make the account. Existing account: their password proves it is them."""
+    inv = _open_invite(db, token)
+    user = db.scalar(select(m.User).where(m.User.email == inv.email))
+    if user is None:
+        if not body.name:
+            raise HTTPException(400, "Name is required")
+        user = m.User(name=body.name, email=inv.email, lang=body.lang, password_hash=hash_password(body.password),
+                      ical_token=new_ical_token())
+        db.add(user)
+        db.flush()
+    elif not verify_password(body.password, user.password_hash):
+        raise HTTPException(401, "Wrong password")
+    if not any(x.group_id == inv.group_id for x in memberships_of(db, user.id)):
+        db.add(m.Membership(user_id=user.id, group_id=inv.group_id, role_id=inv.role_id))
+    user.current_group_id = inv.group_id
+    inv.accepted_at = datetime.utcnow()
+    db.commit()
+    return _token_out(db, user)
+
+
 # =============================== assets ===============================
 @router.get("/assets", response_model=list[s.AssetSummary])
-def list_assets(_: m.User = Depends(current_user), db: Session = Depends(get_db)):
+def list_assets(ctx: Ctx = Depends(group_ctx), db: Session = Depends(get_db)):
     out = []
-    for a in db.scalars(select(m.Asset).order_by(m.Asset.name)):
+    for a in db.scalars(select(m.Asset).where(m.Asset.group_id == ctx.group.id).order_by(m.Asset.name)):
         statuses = [task_status(t) for t in a.tasks]
         out.append(s.AssetSummary(
             **s.AssetOut.model_validate(a).model_dump(),
@@ -177,10 +578,11 @@ def list_assets(_: m.User = Depends(current_user), db: Session = Depends(get_db)
 
 
 @router.post("/assets", response_model=s.AssetOut)
-def create_asset(body: s.AssetIn, user: m.User = Depends(current_user), db: Session = Depends(get_db)):
+def create_asset(body: s.AssetIn, ctx: Ctx = Depends(require("assets.create")), db: Session = Depends(get_db)):
+    user = ctx.user
     data = body.model_dump()
     value = data.pop("counter_value")
-    asset = m.Asset(**data)
+    asset = m.Asset(group_id=ctx.group.id, **data)
     db.add(asset)
     db.flush()
     if value is not None and asset.counter_unit != "none":
@@ -190,8 +592,8 @@ def create_asset(body: s.AssetIn, user: m.User = Depends(current_user), db: Sess
 
 
 @router.get("/assets/{asset_id}", response_model=s.AssetDetail)
-def get_asset(asset_id: int, _: m.User = Depends(current_user), db: Session = Depends(get_db)):
-    a = _get_or_404(db, m.Asset, asset_id)
+def get_asset(asset_id: int, ctx: Ctx = Depends(group_ctx), db: Session = Depends(get_db)):
+    a = _asset(db, ctx, asset_id)
     tasks = sorted(a.tasks, key=lambda t: (not t.active, t.next_due or date.max, t.title))
     attachments = db.scalars(select(m.Attachment).where(
         m.Attachment.entity_type == "asset", m.Attachment.entity_id == a.id)).all()
@@ -210,8 +612,10 @@ def get_asset(asset_id: int, _: m.User = Depends(current_user), db: Session = De
 
 
 @router.put("/assets/{asset_id}", response_model=s.AssetOut)
-def update_asset(asset_id: int, body: s.AssetIn, user: m.User = Depends(current_user), db: Session = Depends(get_db)):
-    a = _get_or_404(db, m.Asset, asset_id)
+def update_asset(asset_id: int, body: s.AssetIn, ctx: Ctx = Depends(require("assets.edit")),
+                 db: Session = Depends(get_db)):
+    user = ctx.user
+    a = _asset(db, ctx, asset_id)
     data = body.model_dump()
     value = data.pop("counter_value")
     for k, v in data.items():
@@ -223,9 +627,10 @@ def update_asset(asset_id: int, body: s.AssetIn, user: m.User = Depends(current_
 
 
 @router.post("/assets/{asset_id}/counter", response_model=s.AssetOut)
-def add_counter_reading(asset_id: int, body: s.CounterIn, user: m.User = Depends(current_user),
+def add_counter_reading(asset_id: int, body: s.CounterIn, ctx: Ctx = Depends(require("counters.record")),
                         db: Session = Depends(get_db)):
-    a = _get_or_404(db, m.Asset, asset_id)
+    user = ctx.user
+    a = _asset(db, ctx, asset_id)
     if a.counter_unit == "none":
         raise HTTPException(400, "This thing has no km / hour counter")
     _record_reading(db, a, body.value, body.reading_on, user.id)
@@ -234,8 +639,9 @@ def add_counter_reading(asset_id: int, body: s.CounterIn, user: m.User = Depends
 
 
 @router.delete("/counter-readings/{reading_id}")
-def delete_counter_reading(reading_id: int, _: m.User = Depends(current_user), db: Session = Depends(get_db)):
-    r = _get_or_404(db, m.CounterReading, reading_id)
+def delete_counter_reading(reading_id: int, ctx: Ctx = Depends(require("counters.record")),
+                           db: Session = Depends(get_db)):
+    r = _mine(db, ctx, m.CounterReading, reading_id)
     a = db.get(m.Asset, r.asset_id)
     db.delete(r)
     db.flush()
@@ -248,8 +654,8 @@ def delete_counter_reading(reading_id: int, _: m.User = Depends(current_user), d
 
 
 @router.delete("/assets/{asset_id}")
-def delete_asset(asset_id: int, _: m.User = Depends(current_user), db: Session = Depends(get_db)):
-    a = _get_or_404(db, m.Asset, asset_id)
+def delete_asset(asset_id: int, ctx: Ctx = Depends(require("assets.delete")), db: Session = Depends(get_db)):
+    a = _asset(db, ctx, asset_id)
     # remove the files of the asset and of everything that belongs to it
     _delete_files(db, "asset", a.id)
     for c in a.components:
@@ -271,9 +677,9 @@ def delete_asset(asset_id: int, _: m.User = Depends(current_user), db: Session =
 
 # =============================== components ===============================
 @router.post("/assets/{asset_id}/components", response_model=s.ComponentOut)
-def create_component(asset_id: int, body: s.ComponentIn, _: m.User = Depends(current_user),
+def create_component(asset_id: int, body: s.ComponentIn, ctx: Ctx = Depends(require("components.create")),
                      db: Session = Depends(get_db)):
-    _get_or_404(db, m.Asset, asset_id)
+    _asset(db, ctx, asset_id)
     c = m.Component(asset_id=asset_id, **body.model_dump())
     db.add(c)
     db.commit()
@@ -281,9 +687,9 @@ def create_component(asset_id: int, body: s.ComponentIn, _: m.User = Depends(cur
 
 
 @router.put("/components/{component_id}", response_model=s.ComponentOut)
-def update_component(component_id: int, body: s.ComponentIn, _: m.User = Depends(current_user),
+def update_component(component_id: int, body: s.ComponentIn, ctx: Ctx = Depends(require("components.edit")),
                      db: Session = Depends(get_db)):
-    c = _get_or_404(db, m.Component, component_id)
+    c = _mine(db, ctx, m.Component, component_id)
     for k, v in body.model_dump().items():
         setattr(c, k, v)
     db.commit()
@@ -291,9 +697,11 @@ def update_component(component_id: int, body: s.ComponentIn, _: m.User = Depends
 
 
 @router.delete("/components/{component_id}")
-def delete_component(component_id: int, _: m.User = Depends(current_user), db: Session = Depends(get_db)):
+def delete_component(component_id: int, ctx: Ctx = Depends(require("components.delete")),
+                     db: Session = Depends(get_db)):
+    c = _mine(db, ctx, m.Component, component_id)
     _delete_files(db, "component", component_id)
-    db.delete(_get_or_404(db, m.Component, component_id))
+    db.delete(c)
     db.commit()
     return {"ok": True}
 
@@ -304,10 +712,11 @@ def list_tasks(
     status: Optional[str] = Query(None, description="overdue | due_soon | ok | none | inactive | open"),
     asset_id: Optional[int] = None,
     mine: bool = False,
-    user: m.User = Depends(current_user),
+    ctx: Ctx = Depends(group_ctx),
     db: Session = Depends(get_db),
 ):
-    q = select(m.Task)
+    user = ctx.user
+    q = select(m.Task).where(m.Task.asset_id.in_(group_asset_ids(db, ctx.group.id)))
     if asset_id:
         q = q.where(m.Task.asset_id == asset_id)
     if mine:
@@ -322,10 +731,12 @@ def list_tasks(
 
 
 @router.post("/assets/{asset_id}/tasks", response_model=s.TaskOut)
-def create_task(asset_id: int, body: s.TaskIn, user: m.User = Depends(current_user), db: Session = Depends(get_db)):
-    _get_or_404(db, m.Asset, asset_id)
+def create_task(asset_id: int, body: s.TaskIn, ctx: Ctx = Depends(require("tasks.create")),
+                db: Session = Depends(get_db)):
+    user = ctx.user
+    _asset(db, ctx, asset_id)
     _check_component(db, asset_id, body.component_id)
-    _check_refs(db, body)
+    _check_refs(db, ctx, body)
     t = m.Task(asset_id=asset_id, created_by_id=user.id, **body.model_dump())
     if t.next_due is None and t.interval_unit != "none":
         t.next_due = date.today()
@@ -339,15 +750,16 @@ def create_task(asset_id: int, body: s.TaskIn, user: m.User = Depends(current_us
 
 
 @router.get("/tasks/{task_id}", response_model=s.TaskDetail)
-def get_task(task_id: int, _: m.User = Depends(current_user), db: Session = Depends(get_db)):
-    return task_out(_get_or_404(db, m.Task, task_id), detail=True)
+def get_task(task_id: int, ctx: Ctx = Depends(group_ctx), db: Session = Depends(get_db)):
+    return task_out(_mine(db, ctx, m.Task, task_id), detail=True)
 
 
 @router.put("/tasks/{task_id}", response_model=s.TaskOut)
-def update_task(task_id: int, body: s.TaskIn, _: m.User = Depends(current_user), db: Session = Depends(get_db)):
-    t = _get_or_404(db, m.Task, task_id)
+def update_task(task_id: int, body: s.TaskIn, ctx: Ctx = Depends(require("tasks.edit")),
+                db: Session = Depends(get_db)):
+    t = _mine(db, ctx, m.Task, task_id)
     _check_component(db, t.asset_id, body.component_id)
-    _check_refs(db, body)
+    _check_refs(db, ctx, body)
     if body.vendor_id != t.vendor_id:  # another vendor: the old request no longer counts
         t.vendor_status, t.vendor_requested_on, t.vendor_booked_for = None, None, None
     for k, v in body.model_dump().items():
@@ -361,8 +773,8 @@ def update_task(task_id: int, body: s.TaskIn, _: m.User = Depends(current_user),
 
 
 @router.delete("/tasks/{task_id}")
-def delete_task(task_id: int, _: m.User = Depends(current_user), db: Session = Depends(get_db)):
-    t = _get_or_404(db, m.Task, task_id)
+def delete_task(task_id: int, ctx: Ctx = Depends(require("tasks.delete")), db: Session = Depends(get_db)):
+    t = _mine(db, ctx, m.Task, task_id)
     _delete_files(db, "task", t.id)
     for c in t.completions:
         _delete_files(db, "completion", c.id)
@@ -372,12 +784,12 @@ def delete_task(task_id: int, _: m.User = Depends(current_user), db: Session = D
 
 
 @router.post("/tasks/{task_id}/complete", response_model=s.TaskDetail)
-def complete_task(task_id: int, body: s.CompletionIn, user: m.User = Depends(current_user),
+def complete_task(task_id: int, body: s.CompletionIn, ctx: Ctx = Depends(require("tasks.complete")),
                   db: Session = Depends(get_db)):
     """Log that the task was done; recurring tasks get a new due date, one-off tasks are closed."""
-    t = _get_or_404(db, m.Task, task_id)
-    if body.vendor_id is not None and db.get(m.Vendor, body.vendor_id) is None:
-        raise HTTPException(400, "Vendor not found")
+    user = ctx.user
+    t = _mine(db, ctx, m.Task, task_id)
+    _check_vendor(db, ctx, body.vendor_id)
     asset = t.asset
     has_counter = asset.counter_unit != "none"
     reading = body.counter_value if has_counter else None
@@ -402,10 +814,10 @@ def complete_task(task_id: int, body: s.CompletionIn, user: m.User = Depends(cur
 
 
 @router.patch("/tasks/{task_id}/vendor-status", response_model=s.TaskOut)
-def set_vendor_status(task_id: int, body: s.VendorStatusIn, _: m.User = Depends(current_user),
+def set_vendor_status(task_id: int, body: s.VendorStatusIn, ctx: Ctx = Depends(require("tasks.edit")),
                       db: Session = Depends(get_db)):
     """requested (the request was sent), confirmed (vendor agreed a date), none (start over)."""
-    t = _get_or_404(db, m.Task, task_id)
+    t = _mine(db, ctx, m.Task, task_id)
     if body.status != "none" and t.vendor_id is None:
         raise HTTPException(400, "The task has no vendor")
     if body.status == "none":
@@ -426,9 +838,11 @@ def set_vendor_status(task_id: int, body: s.VendorStatusIn, _: m.User = Depends(
 
 
 @router.delete("/completions/{completion_id}")
-def delete_completion(completion_id: int, _: m.User = Depends(current_user), db: Session = Depends(get_db)):
+def delete_completion(completion_id: int, ctx: Ctx = Depends(require("history.delete")),
+                      db: Session = Depends(get_db)):
+    c = _mine(db, ctx, m.Completion, completion_id)
     _delete_files(db, "completion", completion_id)
-    db.delete(_get_or_404(db, m.Completion, completion_id))
+    db.delete(c)
     db.commit()
     return {"ok": True}
 
@@ -440,14 +854,14 @@ def _vendor_out(db: Session, v: m.Vendor) -> s.VendorOut:
 
 
 @router.get("/vendors", response_model=list[s.VendorOut])
-def list_vendors(_: m.User = Depends(current_user), db: Session = Depends(get_db)):
-    vendors = db.scalars(select(m.Vendor).order_by(m.Vendor.company)).all()
+def list_vendors(ctx: Ctx = Depends(group_ctx), db: Session = Depends(get_db)):
+    vendors = db.scalars(select(m.Vendor).where(m.Vendor.group_id == ctx.group.id).order_by(m.Vendor.company)).all()
     return [_vendor_out(db, v) for v in vendors]
 
 
 @router.post("/vendors", response_model=s.VendorOut)
-def create_vendor(body: s.VendorIn, _: m.User = Depends(current_user), db: Session = Depends(get_db)):
-    v = m.Vendor(**body.model_dump())
+def create_vendor(body: s.VendorIn, ctx: Ctx = Depends(require("vendors.manage")), db: Session = Depends(get_db)):
+    v = m.Vendor(group_id=ctx.group.id, **body.model_dump())
     db.add(v)
     db.commit()
     db.refresh(v)
@@ -455,14 +869,14 @@ def create_vendor(body: s.VendorIn, _: m.User = Depends(current_user), db: Sessi
 
 
 @router.get("/vendors/{vendor_id}", response_model=s.VendorOut)
-def get_vendor(vendor_id: int, _: m.User = Depends(current_user), db: Session = Depends(get_db)):
-    return _vendor_out(db, _get_or_404(db, m.Vendor, vendor_id))
+def get_vendor(vendor_id: int, ctx: Ctx = Depends(group_ctx), db: Session = Depends(get_db)):
+    return _vendor_out(db, _mine(db, ctx, m.Vendor, vendor_id))
 
 
 @router.get("/vendors/{vendor_id}/history", response_model=s.VendorHistory)
-def vendor_history(vendor_id: int, _: m.User = Depends(current_user), db: Session = Depends(get_db)):
+def vendor_history(vendor_id: int, ctx: Ctx = Depends(group_ctx), db: Session = Depends(get_db)):
     """Open tasks given to the vendor, jobs they did, and what they have cost."""
-    v = _get_or_404(db, m.Vendor, vendor_id)
+    v = _mine(db, ctx, m.Vendor, vendor_id)
     tasks = db.scalars(select(m.Task).where(m.Task.vendor_id == v.id, m.Task.active.is_(True))).all()
     comps = db.scalars(select(m.Completion).where(m.Completion.vendor_id == v.id)
                        .order_by(m.Completion.done_on.desc(), m.Completion.id.desc())).all()
@@ -478,8 +892,9 @@ def vendor_history(vendor_id: int, _: m.User = Depends(current_user), db: Sessio
 
 
 @router.put("/vendors/{vendor_id}", response_model=s.VendorOut)
-def update_vendor(vendor_id: int, body: s.VendorIn, _: m.User = Depends(current_user), db: Session = Depends(get_db)):
-    v = _get_or_404(db, m.Vendor, vendor_id)
+def update_vendor(vendor_id: int, body: s.VendorIn, ctx: Ctx = Depends(require("vendors.manage")),
+                  db: Session = Depends(get_db)):
+    v = _mine(db, ctx, m.Vendor, vendor_id)
     for k, val in body.model_dump().items():
         setattr(v, k, val)
     for p in db.scalars(select(m.SparePart).where(m.SparePart.vendor_id == v.id)):
@@ -490,8 +905,8 @@ def update_vendor(vendor_id: int, body: s.VendorIn, _: m.User = Depends(current_
 
 
 @router.delete("/vendors/{vendor_id}")
-def delete_vendor(vendor_id: int, _: m.User = Depends(current_user), db: Session = Depends(get_db)):
-    v = _get_or_404(db, m.Vendor, vendor_id)
+def delete_vendor(vendor_id: int, ctx: Ctx = Depends(require("vendors.manage")), db: Session = Depends(get_db)):
+    v = _mine(db, ctx, m.Vendor, vendor_id)
     # the column was added later on existing databases, so don't rely on ON DELETE SET NULL
     for t in db.scalars(select(m.Task).where(m.Task.vendor_id == v.id)):
         t.vendor_id, t.vendor_status, t.vendor_requested_on, t.vendor_booked_for = None, None, None, None
@@ -505,22 +920,23 @@ def delete_vendor(vendor_id: int, _: m.User = Depends(current_user), db: Session
 
 
 # =============================== spare parts / shopping ===============================
-def _part_vendor(db: Session, body: s.PartIn) -> None:
+def _part_vendor(db: Session, ctx: Ctx, body: s.PartIn) -> None:
     """The supplier is a vendor from the shared list; keep its name in `supplier` as well."""
     if body.vendor_id is None:
         body.supplier = None
         return
     v = db.get(m.Vendor, body.vendor_id)
-    if v is None:
+    if v is None or v.group_id != ctx.group.id:
         raise HTTPException(400, "Vendor not found")
     body.supplier = v.company
 
 
 @router.post("/assets/{asset_id}/parts", response_model=s.PartOut)
-def create_part(asset_id: int, body: s.PartIn, _: m.User = Depends(current_user), db: Session = Depends(get_db)):
-    _get_or_404(db, m.Asset, asset_id)
+def create_part(asset_id: int, body: s.PartIn, ctx: Ctx = Depends(require("parts.manage")),
+                db: Session = Depends(get_db)):
+    _asset(db, ctx, asset_id)
     _check_component(db, asset_id, body.component_id)
-    _part_vendor(db, body)
+    _part_vendor(db, ctx, body)
     p = m.SparePart(asset_id=asset_id, **body.model_dump())
     db.add(p)
     db.commit()
@@ -529,10 +945,11 @@ def create_part(asset_id: int, body: s.PartIn, _: m.User = Depends(current_user)
 
 
 @router.put("/parts/{part_id}", response_model=s.PartOut)
-def update_part(part_id: int, body: s.PartIn, _: m.User = Depends(current_user), db: Session = Depends(get_db)):
-    p = _get_or_404(db, m.SparePart, part_id)
+def update_part(part_id: int, body: s.PartIn, ctx: Ctx = Depends(require("parts.manage")),
+                db: Session = Depends(get_db)):
+    p = _mine(db, ctx, m.SparePart, part_id)
     _check_component(db, p.asset_id, body.component_id)
-    _part_vendor(db, body)
+    _part_vendor(db, ctx, body)
     for k, v in body.model_dump().items():
         setattr(p, k, v)
     db.commit()
@@ -541,27 +958,29 @@ def update_part(part_id: int, body: s.PartIn, _: m.User = Depends(current_user),
 
 
 @router.delete("/parts/{part_id}")
-def delete_part(part_id: int, _: m.User = Depends(current_user), db: Session = Depends(get_db)):
+def delete_part(part_id: int, ctx: Ctx = Depends(require("parts.manage")), db: Session = Depends(get_db)):
+    p = _mine(db, ctx, m.SparePart, part_id)
     _delete_files(db, "part", part_id)
-    db.delete(_get_or_404(db, m.SparePart, part_id))
+    db.delete(p)
     db.commit()
     return {"ok": True}
 
 
 @router.get("/shopping-list", response_model=list[s.PartOut])
-def shopping_list(_: m.User = Depends(current_user), db: Session = Depends(get_db)):
+def shopping_list(ctx: Ctx = Depends(group_ctx), db: Session = Depends(get_db)):
     """Parts flagged for purchase, plus anything below its minimum stock."""
-    parts = db.scalars(select(m.SparePart)).all()
+    parts = db.scalars(select(m.SparePart).where(m.SparePart.asset_id.in_(group_asset_ids(db, ctx.group.id)))).all()
     out = [part_out(p) for p in parts if p.on_shopping_list or (p.min_qty > 0 and p.qty_in_stock < p.min_qty)]
     out.sort(key=lambda p: (p.supplier or "~", p.name))
     return out
 
 
 @router.post("/parts/{part_id}/bought", response_model=s.PartOut)
-def mark_bought(part_id: int, body: Optional[s.PurchaseIn] = None, user: m.User = Depends(current_user),
+def mark_bought(part_id: int, body: Optional[s.PurchaseIn] = None, ctx: Ctx = Depends(require("parts.manage")),
                 db: Session = Depends(get_db)):
     """Register a purchase: adds the quantity to stock, takes it off the shopping list and records the cost."""
-    p = _get_or_404(db, m.SparePart, part_id)
+    user = ctx.user
+    p = _mine(db, ctx, m.SparePart, part_id)
     if body is None:
         qty = p.qty_to_buy if p.on_shopping_list else max(p.min_qty - p.qty_in_stock, 1)
         body = s.PurchaseIn(qty=max(qty, 1), unit_price=p.unit_price)
@@ -585,8 +1004,9 @@ def mark_bought(part_id: int, body: Optional[s.PurchaseIn] = None, user: m.User 
 
 @router.get("/purchases", response_model=list[s.PurchaseOut])
 def list_purchases(asset_id: Optional[int] = None, part_id: Optional[int] = None,
-                   _: m.User = Depends(current_user), db: Session = Depends(get_db)):
-    q = select(m.Purchase).order_by(m.Purchase.bought_on.desc(), m.Purchase.id.desc())
+                   ctx: Ctx = Depends(group_ctx), db: Session = Depends(get_db)):
+    q = (select(m.Purchase).where(m.Purchase.asset_id.in_(group_asset_ids(db, ctx.group.id)))
+         .order_by(m.Purchase.bought_on.desc(), m.Purchase.id.desc()))
     if asset_id:
         q = q.where(m.Purchase.asset_id == asset_id)
     if part_id:
@@ -595,9 +1015,10 @@ def list_purchases(asset_id: Optional[int] = None, part_id: Optional[int] = None
 
 
 @router.delete("/purchases/{purchase_id}")
-def delete_purchase(purchase_id: int, _: m.User = Depends(current_user), db: Session = Depends(get_db)):
+def delete_purchase(purchase_id: int, ctx: Ctx = Depends(require("history.delete")),
+                    db: Session = Depends(get_db)):
     """Undo a purchase: removes the cost and takes the quantity back out of stock."""
-    pu = _get_or_404(db, m.Purchase, purchase_id)
+    pu = _mine(db, ctx, m.Purchase, purchase_id)
     if pu.part_id:
         part = db.get(m.SparePart, pu.part_id)
         if part:
@@ -610,15 +1031,15 @@ def delete_purchase(purchase_id: int, _: m.User = Depends(current_user), db: Ses
 
 # =============================== warranties ===============================
 @router.get("/warranties", response_model=list[s.WarrantyOut])
-def list_warranties(_: m.User = Depends(current_user), db: Session = Depends(get_db)):
-    ws = db.scalars(select(m.Warranty)).all()
+def list_warranties(ctx: Ctx = Depends(group_ctx), db: Session = Depends(get_db)):
+    ws = db.scalars(select(m.Warranty).where(m.Warranty.asset_id.in_(group_asset_ids(db, ctx.group.id)))).all()
     return sorted([warranty_out(w) for w in ws], key=lambda w: w.end_date or date.max)
 
 
 @router.post("/assets/{asset_id}/warranties", response_model=s.WarrantyOut)
-def create_warranty(asset_id: int, body: s.WarrantyIn, _: m.User = Depends(current_user),
+def create_warranty(asset_id: int, body: s.WarrantyIn, ctx: Ctx = Depends(require("warranties.manage")),
                     db: Session = Depends(get_db)):
-    _get_or_404(db, m.Asset, asset_id)
+    _asset(db, ctx, asset_id)
     _check_component(db, asset_id, body.component_id)
     w = m.Warranty(asset_id=asset_id, **body.model_dump())
     db.add(w)
@@ -628,9 +1049,9 @@ def create_warranty(asset_id: int, body: s.WarrantyIn, _: m.User = Depends(curre
 
 
 @router.put("/warranties/{warranty_id}", response_model=s.WarrantyOut)
-def update_warranty(warranty_id: int, body: s.WarrantyIn, _: m.User = Depends(current_user),
+def update_warranty(warranty_id: int, body: s.WarrantyIn, ctx: Ctx = Depends(require("warranties.manage")),
                     db: Session = Depends(get_db)):
-    w = _get_or_404(db, m.Warranty, warranty_id)
+    w = _mine(db, ctx, m.Warranty, warranty_id)
     _check_component(db, w.asset_id, body.component_id)
     for k, v in body.model_dump().items():
         setattr(w, k, v)
@@ -640,9 +1061,11 @@ def update_warranty(warranty_id: int, body: s.WarrantyIn, _: m.User = Depends(cu
 
 
 @router.delete("/warranties/{warranty_id}")
-def delete_warranty(warranty_id: int, _: m.User = Depends(current_user), db: Session = Depends(get_db)):
+def delete_warranty(warranty_id: int, ctx: Ctx = Depends(require("warranties.manage")),
+                    db: Session = Depends(get_db)):
+    w = _mine(db, ctx, m.Warranty, warranty_id)
     _delete_files(db, "warranty", warranty_id)
-    db.delete(_get_or_404(db, m.Warranty, warranty_id))
+    db.delete(w)
     db.commit()
     return {"ok": True}
 
@@ -654,9 +1077,17 @@ ENTITY_MODELS = {
 }
 
 
+def _entity(db: Session, ctx: Ctx, entity_type: str, entity_id: int):
+    model = ENTITY_MODELS.get(entity_type)
+    if model is None:
+        raise HTTPException(400, "Unknown entity type")
+    return _mine(db, ctx, model, entity_id)
+
+
 @router.get("/attachments", response_model=list[s.AttachmentOut])
-def list_attachments(entity_type: str, entity_id: int, _: m.User = Depends(current_user),
+def list_attachments(entity_type: str, entity_id: int, ctx: Ctx = Depends(group_ctx),
                      db: Session = Depends(get_db)):
+    _entity(db, ctx, entity_type, entity_id)
     return db.scalars(select(m.Attachment).where(
         m.Attachment.entity_type == entity_type, m.Attachment.entity_id == entity_id
     ).order_by(m.Attachment.uploaded_at.desc())).all()
@@ -667,13 +1098,11 @@ async def upload_attachment(
     entity_type: str = Form(...),
     entity_id: int = Form(...),
     file: UploadFile = File(...),
-    user: m.User = Depends(current_user),
+    ctx: Ctx = Depends(require("attachments.add")),
     db: Session = Depends(get_db),
 ):
-    model = ENTITY_MODELS.get(entity_type)
-    if model is None:
-        raise HTTPException(400, "Unknown entity type")
-    _get_or_404(db, model, entity_id)
+    user = ctx.user
+    _entity(db, ctx, entity_type, entity_id)
     data = await file.read()
     if len(data) > MAX_UPLOAD_MB * 1024 * 1024:
         raise HTTPException(413, f"File larger than {MAX_UPLOAD_MB} MB")
@@ -691,8 +1120,9 @@ async def upload_attachment(
 
 
 @router.get("/attachments/{attachment_id}/file")
-def download_attachment(attachment_id: int, _: m.User = Depends(current_user), db: Session = Depends(get_db)):
+def download_attachment(attachment_id: int, ctx: Ctx = Depends(group_ctx), db: Session = Depends(get_db)):
     att = _get_or_404(db, m.Attachment, attachment_id)
+    _entity(db, ctx, att.entity_type, att.entity_id)
     path = UPLOAD_DIR / att.stored_name
     if not path.exists():
         raise HTTPException(404, "File missing on disk")
@@ -700,8 +1130,10 @@ def download_attachment(attachment_id: int, _: m.User = Depends(current_user), d
 
 
 @router.delete("/attachments/{attachment_id}")
-def delete_attachment(attachment_id: int, _: m.User = Depends(current_user), db: Session = Depends(get_db)):
+def delete_attachment(attachment_id: int, ctx: Ctx = Depends(require("attachments.delete")),
+                      db: Session = Depends(get_db)):
     att = _get_or_404(db, m.Attachment, attachment_id)
+    _entity(db, ctx, att.entity_type, att.entity_id)
     (UPLOAD_DIR / att.stored_name).unlink(missing_ok=True)
     db.delete(att)
     db.commit()
@@ -716,9 +1148,10 @@ def get_templates(kind: str, user: m.User = Depends(current_user)):
 
 @router.post("/assets/{asset_id}/apply-template")
 def apply_template(asset_id: int, key: str = Query(...), start: Optional[date] = None,
-                   user: m.User = Depends(current_user), db: Session = Depends(get_db)):
+                   ctx: Ctx = Depends(require("templates.apply")), db: Session = Depends(get_db)):
     """Create the template's components and tasks on the asset. Existing items with the same name are reused."""
-    asset = _get_or_404(db, m.Asset, asset_id)
+    user = ctx.user
+    asset = _asset(db, ctx, asset_id)
     tpl = find_template(key)
     if tpl is None:
         raise HTTPException(404, "Template not found")
@@ -762,10 +1195,12 @@ def apply_template(asset_id: int, key: str = Query(...), start: Optional[date] =
 # =============================== dashboard & calendar ===============================
 @router.get("/dashboard")
 def dashboard(mine: bool = False, asset_id: Optional[int] = None,
-              user: m.User = Depends(current_user), db: Session = Depends(get_db)):
+              ctx: Ctx = Depends(group_ctx), db: Session = Depends(get_db)):
     """Overview. asset_id limits everything (tasks, costs, recent work, warranties, parts) to one thing."""
+    user = ctx.user
+    mine_ids = group_asset_ids(db, ctx.group.id)
     today = date.today()
-    q = select(m.Task).where(m.Task.active.is_(True))
+    q = select(m.Task).where(m.Task.active.is_(True), m.Task.asset_id.in_(mine_ids))
     if asset_id:
         q = q.where(m.Task.asset_id == asset_id)
     if mine:
@@ -779,11 +1214,11 @@ def dashboard(mine: bool = False, asset_id: Optional[int] = None,
     )
 
     year_start = date(today.year, 1, 1)
-    cq = select(m.Completion).join(m.Task)
+    cq = select(m.Completion).join(m.Task).where(m.Task.asset_id.in_(mine_ids))
     if asset_id:
         cq = cq.where(m.Task.asset_id == asset_id)
     comps = db.scalars(cq.where(m.Completion.done_on >= year_start)).all()
-    pq_cost = select(m.Purchase)
+    pq_cost = select(m.Purchase).where(m.Purchase.asset_id.in_(mine_ids))
     if asset_id:
         pq_cost = pq_cost.where(m.Purchase.asset_id == asset_id)
     buys = db.scalars(pq_cost.where(m.Purchase.bought_on >= year_start)).all()
@@ -806,8 +1241,9 @@ def dashboard(mine: bool = False, asset_id: Optional[int] = None,
     ]
     recent = sorted(recent, key=lambda r: (r["date"], r["id"]), reverse=True)[:8]
 
-    wq = select(m.Warranty).where(m.Warranty.end_date >= today, m.Warranty.end_date <= today + timedelta(days=90))
-    pq = select(m.SparePart)
+    wq = select(m.Warranty).where(m.Warranty.end_date >= today, m.Warranty.end_date <= today + timedelta(days=90),
+                                  m.Warranty.asset_id.in_(mine_ids))
+    pq = select(m.SparePart).where(m.SparePart.asset_id.in_(mine_ids))
     if asset_id:
         wq = wq.where(m.Warranty.asset_id == asset_id)
         pq = pq.where(m.SparePart.asset_id == asset_id)
@@ -825,24 +1261,25 @@ def dashboard(mine: bool = False, asset_id: Optional[int] = None,
         "recent": recent,
         "warranties_expiring": warranties,
         "shopping_count": shopping,
-        "asset_count": db.scalar(select(func.count(m.Asset.id))),
+        "asset_count": db.scalar(select(func.count(m.Asset.id)).where(m.Asset.group_id == ctx.group.id)),
     }
 
 
 @router.get("/calendar")
 def calendar(start: date, end: date, mine: bool = False, asset_id: Optional[int] = None,
-             user: m.User = Depends(current_user), db: Session = Depends(get_db)):
+             ctx: Ctx = Depends(group_ctx), db: Session = Depends(get_db)):
     if (end - start).days > 400:
         raise HTTPException(400, "Range too large")
-    return calendar_events(db, start, end, user.id if mine else None, asset_id)
+    return calendar_events(db, start, end, ctx.user.id if mine else None, asset_id, [ctx.group.id])
 
 
 @router.get("/costs")
 def costs(year: Optional[int] = None, asset_id: Optional[int] = None,
-          _: m.User = Depends(current_user), db: Session = Depends(get_db)):
+          ctx: Ctx = Depends(group_ctx), db: Session = Depends(get_db)):
     """All spending (work done + parts bought), newest first. For export / overview."""
-    cq = select(m.Completion).join(m.Task)
-    pq = select(m.Purchase)
+    mine_ids = group_asset_ids(db, ctx.group.id)
+    cq = select(m.Completion).join(m.Task).where(m.Task.asset_id.in_(mine_ids))
+    pq = select(m.Purchase).where(m.Purchase.asset_id.in_(mine_ids))
     if year:
         cq = cq.where(m.Completion.done_on >= date(year, 1, 1), m.Completion.done_on <= date(year, 12, 31))
         pq = pq.where(m.Purchase.bought_on >= date(year, 1, 1), m.Purchase.bought_on <= date(year, 12, 31))

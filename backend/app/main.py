@@ -14,7 +14,8 @@ from fastapi.staticfiles import StaticFiles
 
 from . import api, ical, reminders
 from .config import DATABASE_URL, FRONTEND_DIR
-from .db import Base, add_missing_columns, engine, link_part_suppliers
+from .db import Base, SessionLocal, add_missing_columns, engine, link_part_suppliers
+from .permissions import migrate_to_groups
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("totalmaint")
@@ -32,13 +33,18 @@ async def lifespan(_: FastAPI):
     linked = link_part_suppliers() if "spare_parts.vendor_id" in added else 0
     if linked:
         log.info("Database: linked %s spare parts to the vendor list", linked)
+    # once, when groups arrive: existing users and things become one family group
+    with SessionLocal() as db:
+        msg = migrate_to_groups(db)
+    if msg:
+        log.info("Database: groups – %s", msg)
     log.info("Database: %s", DATABASE_URL.split("@")[-1])
     task = asyncio.create_task(reminders.scheduler_loop())
     yield
     task.cancel()
 
 
-app = FastAPI(title="TotalMaint", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="TotalMaint", version="0.3.1", lifespan=lifespan)
 app.include_router(api.router)
 app.include_router(reminders.router)
 app.include_router(ical.router)
