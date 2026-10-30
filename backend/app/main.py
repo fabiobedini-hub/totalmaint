@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import api, ical, reminders
-from .config import DATABASE_URL, FRONTEND_DIR
+from .config import APP_VERSION, DATABASE_URL, FRONTEND_DIR
 from .db import Base, SessionLocal, add_missing_columns, engine, link_part_suppliers
 from .permissions import migrate_to_groups
 
@@ -44,7 +44,7 @@ async def lifespan(_: FastAPI):
     task.cancel()
 
 
-app = FastAPI(title="TotalMaint", version="0.3.2", lifespan=lifespan)
+app = FastAPI(title="TotalMaint", version=APP_VERSION, lifespan=lifespan)
 app.include_router(api.router)
 app.include_router(reminders.router)
 app.include_router(ical.router)

@@ -51,6 +51,8 @@ def current_user(
     user = db.get(User, int(payload["sub"]))
     if user is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User no longer exists")
+    if user.blocked:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This account is blocked; contact the administrator")
     if payload.get("v", 0) != (user.session_version or 0):  # logged in before the password was reset
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Session expired, please log in again")
     return user

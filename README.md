@@ -73,6 +73,10 @@ solved on the NAS with Tailscale or the reverse proxy (see below).
 * **Register a new family** from the log-in screen: the person names the family and becomes its
   owner. `SIGNUP=closed` in `.env` switches this off (invitations only); `SIGNUP_CODE` makes it
   need a code you hand out. Someone with an account adds another family under Settings → New family.
+* **TotalMant Admin**, a separate console for whoever runs the server (port 8081 on the NAS,
+  home network and Tailscale only, its own `ADMIN_PASSWORD`): dashboard, families, users
+  (password link, block, delete), invitations, e-mail log, sign-up settings, backups, database.
+  Locally: `run_admin.bat` → <http://localhost:8001>. Code: `backend/app/admin_main.py` + `admin/`.
 * **Multiple users** with their own language (English / Norwegian) and "only my tasks".
 * **E-mail reminders** once a day (configure SMTP in `.env`; without it they are only logged).
 

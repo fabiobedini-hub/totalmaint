@@ -139,14 +139,46 @@ Nota: se `git log` dice che il tuo ramo è "behind", al prossimo `update.sh` tor
 ```
 cd /volume1/docker/totalmaint
 ls backup/
-docker compose stop app
+docker compose stop app admin
 docker compose exec -T db psql -U totalmaint -d totalmaint -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
 gunzip -c backup/db-AAAA-MM-GG_HHMM.sql.gz | docker compose exec -T db psql -U totalmaint -d totalmaint
-docker compose start app
+docker compose start app admin
 ```
+Vale anche per i backup fatti con "Backup ora" in TotalMant Admin: sono nella stessa cartella e nello stesso formato.
 (Se il progetto in Container Manager ha un nome diverso dalla cartella, aggiungi `-p NOME` dopo `docker compose`.)
 
 **Vedere gli errori dell'app:**
 ```
 docker compose logs --tail 100 app
 ```
+
+---
+
+## F. TotalMant Admin (la console per te)
+
+È un'app separata per chi gestisce il server: famiglie, utenti, inviti, e-mail, impostazioni, backup e database.
+Usa lo stesso database di TotalMaint, ma ha **una sua porta e una sua password** e risponde **solo dalla rete di casa e da Tailscale**.
+
+| Porta | Cosa | Chi ci arriva |
+|---|---|---|
+| 8080 | TotalMaint (l'app delle famiglie) | tutti quelli che inviti / condividi |
+| 8081 | **TotalMant Admin** | solo tu: rete di casa e il tuo Tailscale |
+| 8082 | Adminer (tabelle del database, a mano) | solo dalla rete di casa |
+
+**Prima volta sul NAS**
+1. Nel `.env` aggiungi una password lunga (almeno 10 caratteri), diversa da quella dell'app:
+   ```
+   ADMIN_PASSWORD=una-frase-lunga-che-sai-solo-tu
+   ```
+2. Aggiorna come sempre: `sudo bash nas/update.sh` (crea anche i container `admin` e `adminer`).
+3. Apri `http://IP-DEL-NAS:8081` da casa, oppure `http://ds723:8081` con Tailscale acceso.
+
+**Sicurezza**
+* Sul router **non** inoltrare le porte 8081 e 8082.
+* Con Tailscale Serve pubblica **solo** la 8080 (`tailscale serve --bg 8080`), mai la 8081.
+* Con la regola Tailscale `autogroup:shared → tcp:443` gli amici con cui condividi il NAS non arrivano alla 8081.
+* Dopo 5 password sbagliate la console si blocca per 15 minuti. Cambiando `ADMIN_PASSWORD` tutte le sessioni aperte vengono chiuse.
+
+**Sul PC (prova locale)**: avvia `run_local.bat`, poi in un'altra finestra `run_admin.bat`, e apri <http://localhost:8001>.
+Senza `ADMIN_PASSWORD` nel `.env` la password di prova è `admin-locale-123`.
+

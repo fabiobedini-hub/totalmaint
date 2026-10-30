@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from . import models as m
 from . import schemas as s
+from . import events
 from .auth import create_token, current_user, hash_password, new_ical_token, verify_password
 from .config import (INVITE_DAYS, MAX_UPLOAD_MB, PUBLIC_URL, RESET_HOURS, SIGNUP_CODE, SIGNUP_ENABLED, SMTP_HOST,
                      UPLOAD_DIR)
@@ -104,16 +105,30 @@ def _token_out(db: Session, user: m.User) -> s.TokenOut:
     return s.TokenOut(token=create_token(user), user=s.UserOut.model_validate(user))
 
 
+def signup_settings(db: Session) -> tuple[str, str]:
+    """(mode, code): mode is "open", "code" or "closed". TotalMant Admin can change it (settings table);
+    otherwise SIGNUP / SIGNUP_CODE from .env count."""
+    rows = {r.key: r.value for r in db.scalars(select(m.Setting).where(m.Setting.key.in_(["signup_mode", "signup_code"])))}
+    if "signup_mode" in rows:
+        mode = rows["signup_mode"]
+        return mode, rows.get("signup_code", "") if mode == "code" else ""
+    if not SIGNUP_ENABLED:
+        return "closed", ""
+    return ("code", SIGNUP_CODE) if SIGNUP_CODE else ("open", "")
+
+
 @router.get("/auth/status")
 def auth_status(db: Session = Depends(get_db)):
     has_users = db.scalar(select(func.count(m.User.id))) > 0
-    return {"needs_setup": not has_users, "signup_enabled": SIGNUP_ENABLED, "signup_needs_code": bool(SIGNUP_CODE)}
+    mode, code = signup_settings(db)
+    return {"needs_setup": not has_users, "signup_enabled": mode != "closed", "signup_needs_code": bool(code)}
 
 
-def _check_signup_code(code: str) -> None:
-    if not SIGNUP_ENABLED:
+def _check_signup_code(db: Session, code: str) -> None:
+    mode, wanted = signup_settings(db)
+    if mode == "closed":
         raise HTTPException(403, "Registering new families is switched off; ask for an invitation")
-    if SIGNUP_CODE and not secrets.compare_digest((code or "").strip(), SIGNUP_CODE):
+    if wanted and not secrets.compare_digest((code or "").strip(), wanted):
         raise HTTPException(403, "Wrong sign-up code")
 
 
@@ -127,7 +142,8 @@ def first_setup(body: s.SetupIn, db: Session = Depends(get_db)):
                   ical_token=new_ical_token())
     db.add(user)
     db.flush()
-    new_group(db, body.group_name or ("Familien" if body.lang == "no" else "Family"), user)
+    g = new_group(db, body.group_name or ("Familien" if body.lang == "no" else "Family"), user)
+    events.log(db, "setup", f"{user.name} <{user.email}> set up the server with {g.name}", user, g.id)
     db.commit()
     return _token_out(db, user)
 
@@ -135,7 +151,7 @@ def first_setup(body: s.SetupIn, db: Session = Depends(get_db)):
 @router.post("/auth/signup", response_model=s.TokenOut)
 def signup(body: s.SignupIn, db: Session = Depends(get_db)):
     """Register a new family: a new account and a new group with that name, the person as owner."""
-    _check_signup_code(body.code)
+    _check_signup_code(db, body.code)
     email = body.email.lower().strip()
     if db.scalar(select(m.User).where(m.User.email == email)):
         raise HTTPException(400, "This e-mail already has an account: log in and add the new family under Settings")
@@ -143,7 +159,8 @@ def signup(body: s.SignupIn, db: Session = Depends(get_db)):
                   ical_token=new_ical_token())
     db.add(user)
     db.flush()
-    new_group(db, body.group_name, user)
+    g = new_group(db, body.group_name, user)
+    events.log(db, "signup", f"{user.name} <{user.email}> registered {g.name}", user, g.id)
     db.commit()
     return _token_out(db, user)
 
@@ -153,6 +170,12 @@ def login(body: s.LoginIn, db: Session = Depends(get_db)):
     user = db.scalar(select(m.User).where(m.User.email == body.email.lower().strip()))
     if user is None or not verify_password(body.password, user.password_hash):
         raise HTTPException(401, "Wrong e-mail or password")
+    if user.blocked:
+        events.log(db, "login_blocked", user.email, user)
+        db.commit()
+        raise HTTPException(403, "This account is blocked; contact the administrator")
+    events.log(db, "login", user.email, user, user.current_group_id)
+    db.commit()
     return _token_out(db, user)
 
 
@@ -235,12 +258,15 @@ def forgot_password(body: s.ForgotIn, db: Session = Depends(get_db)):
     """E-mails a reset link. The answer is the same whether the address exists or not,
     so the page can't be used to find out who has an account."""
     user = db.scalar(select(m.User).where(m.User.email == body.email.lower().strip()))
-    if user is not None and SMTP_HOST:
+    if user is not None and SMTP_HOST and not user.blocked:
         recent = db.scalar(select(func.count(m.PasswordReset.id)).where(
             m.PasswordReset.user_id == user.id,
             m.PasswordReset.created_at >= datetime.utcnow() - timedelta(hours=1))) or 0
         if recent < 3:  # don't let anyone flood a mailbox
-            send_password_reset(user, _new_reset(db, user), RESET_HOURS, body.lang)
+            sent, err = send_password_reset(user, _new_reset(db, user), RESET_HOURS, body.lang)
+            events.log(db, "mail_sent" if sent else "mail_failed",
+                       f"Password link to {user.email}" + (f": {err}" if err else ""), user)
+            db.commit()
     return {"ok": True, "mail_enabled": bool(SMTP_HOST)}
 
 
@@ -255,9 +281,12 @@ def reset_password(token: str, body: s.ResetIn, db: Session = Depends(get_db)):
     """Sets the new password, logs out every other device, and logs this one in."""
     r = _open_reset(db, token)
     user = r.user
+    if user.blocked:
+        raise HTTPException(403, "This account is blocked; contact the administrator")
     user.password_hash = hash_password(body.password)
     user.session_version = (user.session_version or 0) + 1
     r.used_at = datetime.utcnow()
+    events.log(db, "reset_done", user.email, user)
     db.commit()
     return _token_out(db, user)
 
@@ -270,7 +299,10 @@ def admin_reset_link(user_id: int, ctx: Ctx = Depends(require("members.manage"))
         raise HTTPException(403, "Only the owner can do this for the owner")
     if len(memberships_of(db, user_id)) > 1 and user_id != ctx.user.id:
         raise HTTPException(403, "This person is also in another group; they use \"Forgot password\" themselves")
-    return {"link": _new_reset(db, mem.user, ctx.user), "hours": RESET_HOURS}
+    link = _new_reset(db, mem.user, ctx.user)
+    events.log(db, "reset_requested", f"{ctx.user.email} made a password link for {mem.user.email}", ctx.user, ctx.group.id)
+    db.commit()
+    return {"link": link, "hours": RESET_HOURS}
 
 
 # =============================== group, members ===============================
@@ -318,8 +350,9 @@ def _owner_count(db: Session, group_id: int) -> int:
 def create_group(body: s.NewGroupIn, user: m.User = Depends(current_user), db: Session = Depends(get_db)):
     """Someone who already has an account starts another family (a cabin with friends, a boat club ...).
     They become its owner and the app switches to it."""
-    _check_signup_code(body.code)
+    _check_signup_code(db, body.code)
     g = new_group(db, body.name.strip(), user)
+    events.log(db, "family_created", f"{user.email} created {g.name}", user, g.id)
     db.commit()
     return s.GroupOut(id=g.id, name=g.name)
 
@@ -356,6 +389,8 @@ def create_user(body: s.UserCreate, ctx: Ctx = Depends(require("members.manage")
     db.flush()
     mem = m.Membership(user_id=user.id, group_id=ctx.group.id, role_id=role.id)
     db.add(mem)
+    events.log(db, "member_added", f"{ctx.user.email} added {user.email} to {ctx.group.name} as {role.name}",
+               ctx.user, ctx.group.id)
     db.commit()
     db.refresh(mem)
     return _member_out(mem)
@@ -404,6 +439,7 @@ def delete_user(user_id: int, ctx: Ctx = Depends(require("members.manage")), db:
         t.assigned_to_id = None
     db.delete(mem)
     db.flush()
+    events.log(db, "member_removed", f"{ctx.user.email} removed {user.email} from {ctx.group.name}", ctx.user, ctx.group.id)
     if not memberships_of(db, user.id):
         db.delete(user)
     elif user.current_group_id == ctx.group.id:
@@ -531,6 +567,13 @@ def create_invitation(body: s.InvitationIn, ctx: Ctx = Depends(require("members.
     db.refresh(inv)
     out = _invite_out(inv)
     out.mailed, out.mail_error = send_invitation(inv, body.lang or ctx.user.lang)
+    events.log(db, "invite_sent", f"{ctx.user.email} invited {email} to {ctx.group.name} as {role.name}"
+               + ("" if out.mailed else " (link copied, no e-mail)"), ctx.user, ctx.group.id)
+    if out.mailed:
+        events.log(db, "mail_sent", f"Invitation to {email}", ctx.user, ctx.group.id)
+    elif SMTP_HOST:
+        events.log(db, "mail_failed", f"Invitation to {email}: {out.mail_error}", ctx.user, ctx.group.id)
+    db.commit()
     return out
 
 
@@ -568,10 +611,13 @@ def accept_invitation(token: str, body: s.AcceptIn, db: Session = Depends(get_db
         db.flush()
     elif not verify_password(body.password, user.password_hash):
         raise HTTPException(401, "Wrong password")
+    elif user.blocked:
+        raise HTTPException(403, "This account is blocked; contact the administrator")
     if not any(x.group_id == inv.group_id for x in memberships_of(db, user.id)):
         db.add(m.Membership(user_id=user.id, group_id=inv.group_id, role_id=inv.role_id))
     user.current_group_id = inv.group_id
     inv.accepted_at = datetime.utcnow()
+    events.log(db, "invite_accepted", f"{user.email} joined {inv.group.name} as {inv.role.name}", user, inv.group_id)
     db.commit()
     return _token_out(db, user)
 
@@ -670,8 +716,13 @@ def delete_counter_reading(reading_id: int, ctx: Ctx = Depends(require("counters
 
 @router.delete("/assets/{asset_id}")
 def delete_asset(asset_id: int, ctx: Ctx = Depends(require("assets.delete")), db: Session = Depends(get_db)):
-    a = _asset(db, ctx, asset_id)
-    # remove the files of the asset and of everything that belongs to it
+    _purge_asset(db, _asset(db, ctx, asset_id))
+    db.commit()
+    return {"ok": True}
+
+
+def _purge_asset(db: Session, a: m.Asset) -> None:
+    """Delete an asset with everything that belongs to it, files on disk included (no commit)."""
     _delete_files(db, "asset", a.id)
     for c in a.components:
         _delete_files(db, "component", c.id)
@@ -686,8 +737,6 @@ def delete_asset(asset_id: int, ctx: Ctx = Depends(require("assets.delete")), db
     for pu in db.scalars(select(m.Purchase).where(m.Purchase.asset_id == a.id)):
         _delete_files(db, "purchase", pu.id)
     db.delete(a)
-    db.commit()
-    return {"ok": True}
 
 
 # =============================== components ===============================

@@ -67,3 +67,18 @@ SIGNUP_CODE = os.getenv("SIGNUP_CODE", "").strip()
 SIGNUP_ENABLED = SIGNUP != "closed"
 INVITE_DAYS = int(os.getenv("INVITE_DAYS", "14"))  # how long an invitation link works
 RESET_HOURS = int(os.getenv("RESET_HOURS", "2"))    # how long a "forgot password" link works
+
+# ---- TotalMant Admin (the separate console for the server's administrator) ----
+# Password for the console. Empty = the console refuses every log-in.
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+# Who may even open the console: home networks, Tailscale, the NAS itself. Comma-separated, or "*" for anyone.
+ADMIN_ALLOW_NETS = os.getenv(
+    "ADMIN_ALLOW_NETS",
+    "127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,fd7a:115c:a1e0::/48,fc00::/7,fe80::/10",
+)
+ADMIN_SESSION_HOURS = int(os.getenv("ADMIN_SESSION_HOURS", "12"))
+ADMIN_DIR = Path(os.getenv("ADMIN_DIR", PROJECT_DIR / "admin"))
+BACKUP_DIR = Path(os.getenv("BACKUP_DIR", PROJECT_DIR / "backup"))
+# Where Adminer (raw database tool) answers; empty = same host as the console, port 8082
+ADMINER_URL = os.getenv("ADMINER_URL", "")
+APP_VERSION = "0.4.0"

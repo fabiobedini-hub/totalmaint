@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from . import events
 from . import models as m
 from .auth import admin_user
 from .permissions import Ctx, require
@@ -30,7 +31,7 @@ router = APIRouter(prefix="/api/reminders")
 def collect(db: Session, group_id: int | None = None) -> dict[int, list[m.Task]]:
     """Tasks to remind about, per user id: from the groups the user is in (every role, viewers too).
     Unassigned tasks go to every member of the group. group_id limits it to one group."""
-    users = db.scalars(select(m.User).where(m.User.email_reminders.is_(True))).all()
+    users = db.scalars(select(m.User).where(m.User.email_reminders.is_(True), m.User.blocked.is_(False))).all()
     tasks = [t for t in db.scalars(select(m.Task).where(m.Task.active.is_(True)))
              if task_status(t) in ("overdue", "due_soon")]
     groups_of: dict[int, set[int]] = {}
@@ -99,9 +100,14 @@ def run_once(db: Session, force: bool = False) -> list[dict]:
             error = "SMTP_HOST is not set in .env, so nothing was sent (only logged)"
             log.info("[no SMTP configured] would e-mail %s about %d task(s)", user.email, len(tasks))
         summary.append({"user": user.email, "tasks": [t.title for t in tasks], "sent": sent, "error": error})
+        if SMTP_HOST:
+            events.log(db, "mail_sent" if sent else "mail_failed",
+                       f"Reminder to {user.email}: {len(tasks)} task(s)" + (f" – {error}" if error else ""), user)
         if sent:  # only mark as reminded when the mail really went out, so a failure is retried
             for t in fresh:
                 t.last_reminded_on = today
+    events.log(db, "reminders", f"{sum(1 for x in summary if x['sent'])} of {len(summary)} reminder e-mail(s) sent"
+               + ("" if SMTP_HOST else " (no SMTP: only logged)"))
     db.commit()
     return summary
 

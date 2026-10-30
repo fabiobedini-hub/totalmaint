@@ -71,6 +71,12 @@ for i in $(seq 1 30); do
     if $DC exec -T app python -c "import urllib.request;urllib.request.urlopen('http://localhost:8000/health')" >/dev/null 2>&1; then
         echo ""
         echo "OK - TotalMaint aggiornato alla versione $NEW"
+        if grep -qE '^ADMIN_PASSWORD=.{10,}' .env 2>/dev/null; then
+            echo "   TotalMant Admin: http://<ip-del-nas>:8081"
+        else
+            echo "   TotalMant Admin e' bloccato: metti ADMIN_PASSWORD (almeno 10 caratteri) nel .env"
+            echo "   e poi:  sudo $DC up -d admin"
+        fi
         exit 0
     fi
     sleep 2

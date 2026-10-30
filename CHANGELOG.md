@@ -2,6 +2,14 @@
 
 Una riga per ogni modifica pubblicata. La più recente in alto.
 
+## 0.4.0 – 2026-10-30
+- **TotalMant Admin**: console separata per chi gestisce il server, sulla porta 8081 (rete di casa e Tailscale), con password propria `ADMIN_PASSWORD`. Dashboard (oggi rispetto a ieri, il mese rispetto al mese scorso, ultime attività, azioni rapide), famiglie, utenti (link password, blocca/sblocca, elimina), inviti e registrazioni, registro e-mail ed e-mail di prova, registrazione aperta/con codice/chiusa senza riavviare, backup con un clic e download, tabelle del database, registro eventi.
+- **Adminer** sulla porta 8082 per vedere le tabelle a mano.
+- Nuova tabella `events`: registrazioni, accessi, inviti, e-mail, backup (solo chi/cosa/quando, mai il contenuto delle famiglie).
+- Account **bloccabili**: niente accesso, sessioni chiuse subito, niente promemoria.
+- Corretto: `SIGNUP`, `SIGNUP_CODE`, `INVITE_DAYS`, `RESET_HOURS` nel `.env` non arrivavano all'app sul NAS (mancavano nel `docker-compose.yml`).
+- Immagine Docker su Debian 13 con `pg_dump`, necessario per "Backup ora".
+
 ## 0.3.2 – 2026-10-30
 - **Registrer en ny familie** dalla pagina di login: nome della famiglia, nome, e-mail e password; chi registra diventa Eier. Aperto di default; `SIGNUP=closed` nel `.env` lo chiude, `SIGNUP_CODE` richiede un codice.
 - Anche il primo utente sceglie il nome della famiglia (prima era sempre "Family").

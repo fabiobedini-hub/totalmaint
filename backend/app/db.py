@@ -40,6 +40,7 @@ NEW_COLUMNS = {
     "users": {
         "current_group_id": "INTEGER REFERENCES groups(id) ON DELETE SET NULL",
         "session_version": "INTEGER NOT NULL DEFAULT 0",
+        "blocked": "BOOLEAN NOT NULL DEFAULT FALSE",
     },
     "vendors": {
         "group_id": "INTEGER REFERENCES groups(id) ON DELETE CASCADE",

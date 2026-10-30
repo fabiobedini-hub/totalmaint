@@ -1,7 +1,14 @@
 # TotalMaint on the Synology DS723+ (Container Manager > Project > Create, point it at this folder)
 # or on your PC with Docker Desktop:  docker compose up -d --build
 #
-# Copy .env.example to .env first and set at least POSTGRES_PASSWORD and SECRET_KEY.
+# Copy .env.example to .env first and set at least POSTGRES_PASSWORD and SECRET_KEY
+# (and ADMIN_PASSWORD for the TotalMant Admin console).
+#
+#   8080  TotalMaint, the app for the families
+#   8081  TotalMant Admin, the console for you (home network and your Tailscale only)
+#   8082  Adminer, raw database tables (home network only; log in with POSTGRES_PASSWORD)
+#
+# Don't forward 8081 / 8082 on the router, and with Tailscale Serve only publish 8080.
 
 services:
   db:
@@ -21,6 +28,7 @@ services:
 
   app:
     build: .
+    image: totalmaint:local
     restart: unless-stopped
     depends_on:
       db:
@@ -33,6 +41,10 @@ services:
       PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8080}
       TZ: Europe/Oslo
       REMINDER_HOUR: ${REMINDER_HOUR:-7}
+      SIGNUP: ${SIGNUP:-open}
+      SIGNUP_CODE: ${SIGNUP_CODE:-}
+      INVITE_DAYS: ${INVITE_DAYS:-14}
+      RESET_HOURS: ${RESET_HOURS:-2}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USER: ${SMTP_USER:-}
@@ -42,3 +54,56 @@ services:
       - ./data/app:/data
     ports:
       - "8080:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  # TotalMant Admin: same image, same database, its own port and password.
+  # It starts after the app, so the app has finished updating the database first.
+  admin:
+    image: totalmaint:local
+    build: .
+    restart: unless-stopped
+    command: ["python", "-m", "uvicorn", "app.admin_main:app", "--host", "0.0.0.0", "--port", "8001"]
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://totalmaint:${POSTGRES_PASSWORD}@db:5432/totalmaint
+      DATA_DIR: /data
+      UPLOAD_DIR: /data/uploads
+      BACKUP_DIR: /backup
+      SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY in .env}
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8080}
+      TZ: Europe/Oslo
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      ADMIN_SESSION_HOURS: ${ADMIN_SESSION_HOURS:-12}
+      ADMINER_URL: ${ADMINER_URL:-}
+      SIGNUP: ${SIGNUP:-open}
+      SIGNUP_CODE: ${SIGNUP_CODE:-}
+      INVITE_DAYS: ${INVITE_DAYS:-14}
+      RESET_HOURS: ${RESET_HOURS:-2}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+    volumes:
+      - ./data/app:/data
+      - ./backup:/backup
+    ports:
+      - "8081:8001"
+
+  # Adminer: look at / fix the database tables by hand. System PostgreSQL, server "db",
+  # user "totalmaint", password = POSTGRES_PASSWORD.
+  adminer:
+    image: adminer:latest
+    restart: unless-stopped
+    depends_on:
+      - db
+    environment:
+      ADMINER_DEFAULT_SERVER: db
+    ports:
+      - "8082:8080"

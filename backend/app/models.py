@@ -39,6 +39,8 @@ class User(Base):
     current_group_id: Mapped[Optional[int]] = mapped_column(ForeignKey("groups.id", ondelete="SET NULL"), nullable=True)
     # goes up by one when the password is reset: log-ins (tokens) made before that stop working
     session_version: Mapped[int] = mapped_column(Integer, default=0)
+    # set from TotalMant Admin: the person can't log in until unblocked
+    blocked: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -82,6 +84,25 @@ class Membership(Base):
     user: Mapped[User] = relationship()
     group: Mapped[Group] = relationship(back_populates="memberships")
     role: Mapped[Role] = relationship()
+
+
+class Event(Base):
+    """What happened on the server (sign-ups, log-ins, e-mails, backups ...), shown in TotalMant Admin.
+    Only who/what/when: never the content of a family's things."""
+    __tablename__ = "events"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    kind: Mapped[str] = mapped_column(String(30), index=True)
+    text: Mapped[str] = mapped_column(String(300), default="")
+    user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    group_id: Mapped[Optional[int]] = mapped_column(ForeignKey("groups.id", ondelete="SET NULL"), nullable=True)
+
+
+class Setting(Base):
+    """Server settings changed from TotalMant Admin; they win over the values in .env."""
+    __tablename__ = "settings"
+    key: Mapped[str] = mapped_column(String(50), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default="")
 
 
 class PasswordReset(Base):

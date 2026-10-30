@@ -14,6 +14,8 @@ os.environ["DATA_DIR"] = str(_TMP)
 os.environ["DATABASE_URL"] = f"sqlite:///{(_TMP / 'test.db').as_posix()}"
 os.environ["UPLOAD_DIR"] = str(_TMP / "uploads")
 os.environ["SECRET_KEY"] = "test-secret-key-not-for-production"
+os.environ["ADMIN_PASSWORD"] = "admin-test-password"
+os.environ["BACKUP_DIR"] = str(_TMP / "backup")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest  # noqa: E402
