@@ -2,6 +2,7 @@
 
 `log()` only adds the row to the session; the caller's commit saves it together with the change.
 """
+import json
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -30,5 +31,8 @@ KINDS = {
 
 
 def log(db: Session, kind: str, text: str = "", user: Optional[m.User] = None, group_id: Optional[int] = None,
-        user_id: Optional[int] = None) -> None:
-    db.add(m.Event(kind=kind, text=(text or "")[:300], user_id=user.id if user else user_id, group_id=group_id))
+        user_id: Optional[int] = None, msg: Optional[str] = None, **params) -> None:
+    """text: the English sentence. msg + params: the same sentence for TotalMant Admin to translate
+    (keys m_<msg> in admin/i18n.js)."""
+    db.add(m.Event(kind=kind, text=(text or "")[:300], user_id=user.id if user else user_id, group_id=group_id,
+                   msg=msg, params=json.dumps(params, ensure_ascii=False, default=str) if msg else None))

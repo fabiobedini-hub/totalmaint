@@ -55,6 +55,10 @@ NEW_COLUMNS = {
         "vendor_requested_on": "DATE",
         "vendor_booked_for": "DATE",
     },
+    "events": {
+        "msg": "VARCHAR(40)",
+        "params": "TEXT",
+    },
     "assets": {
         "group_id": "INTEGER REFERENCES groups(id) ON DELETE CASCADE",
         "counter_unit": "VARCHAR(10) NOT NULL DEFAULT 'none'",

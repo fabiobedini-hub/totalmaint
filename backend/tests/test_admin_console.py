@@ -140,3 +140,22 @@ def test_system_and_mail_pages(api, admin):
     assert admin.get("/api/mail").json()["configured"] is False
     assert admin.post("/api/mail/test", json={"to": "a@b.no"}).json()["ok"] is False
     assert admin.get("/api/events").json()["events"]
+
+
+def test_messages_follow_the_language(client):
+    from app.admin_main import _fails, app as admin_app
+    _fails.clear()
+    with TestClient(admin_app, client=HOME) as c:
+        for lang, word in [("en", "Wrong password"), ("no", "Feil passord"), ("it", "Password sbagliata")]:
+            r = c.post("/api/login", json={"password": "nope"}, headers={"X-Lang": lang})
+            assert r.json()["detail"] == word
+    _fails.clear()
+    with TestClient(admin_app, client=("81.166.10.10", 4000)) as outside:
+        assert "rete di casa" in outside.get("/", headers={"Accept-Language": "it-IT,it;q=0.9"}).json()["detail"]
+
+
+def test_events_carry_key_and_values_for_translation(api, client, admin):
+    register(client, "ola@test.no", "Familien Nordmann")
+    ev = next(e for e in admin.get("/api/events?kind=signup").json()["events"])
+    assert ev["msg"] == "signup" and ev["params"] == {"name": "ola", "email": "ola@test.no", "family": "Familien Nordmann"}
+    assert ev["text"] == "ola <ola@test.no> registered Familien Nordmann"  # English stays for older viewers and search

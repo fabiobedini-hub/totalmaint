@@ -143,7 +143,8 @@ def first_setup(body: s.SetupIn, db: Session = Depends(get_db)):
     db.add(user)
     db.flush()
     g = new_group(db, body.group_name or ("Familien" if body.lang == "no" else "Family"), user)
-    events.log(db, "setup", f"{user.name} <{user.email}> set up the server with {g.name}", user, g.id)
+    events.log(db, "setup", f"{user.name} <{user.email}> set up the server with {g.name}", user, g.id,
+               msg="setup", name=user.name, email=user.email, family=g.name)
     db.commit()
     return _token_out(db, user)
 
@@ -160,7 +161,8 @@ def signup(body: s.SignupIn, db: Session = Depends(get_db)):
     db.add(user)
     db.flush()
     g = new_group(db, body.group_name, user)
-    events.log(db, "signup", f"{user.name} <{user.email}> registered {g.name}", user, g.id)
+    events.log(db, "signup", f"{user.name} <{user.email}> registered {g.name}", user, g.id,
+               msg="signup", name=user.name, email=user.email, family=g.name)
     db.commit()
     return _token_out(db, user)
 
@@ -171,10 +173,10 @@ def login(body: s.LoginIn, db: Session = Depends(get_db)):
     if user is None or not verify_password(body.password, user.password_hash):
         raise HTTPException(401, "Wrong e-mail or password")
     if user.blocked:
-        events.log(db, "login_blocked", user.email, user)
+        events.log(db, "login_blocked", user.email, user, msg="email", email=user.email)
         db.commit()
         raise HTTPException(403, "This account is blocked; contact the administrator")
-    events.log(db, "login", user.email, user, user.current_group_id)
+    events.log(db, "login", user.email, user, user.current_group_id, msg="email", email=user.email)
     db.commit()
     return _token_out(db, user)
 
@@ -265,7 +267,8 @@ def forgot_password(body: s.ForgotIn, db: Session = Depends(get_db)):
         if recent < 3:  # don't let anyone flood a mailbox
             sent, err = send_password_reset(user, _new_reset(db, user), RESET_HOURS, body.lang)
             events.log(db, "mail_sent" if sent else "mail_failed",
-                       f"Password link to {user.email}" + (f": {err}" if err else ""), user)
+                       f"Password link to {user.email}" + (f": {err}" if err else ""), user,
+                       msg="mail_reset", email=user.email, error=err or "")
             db.commit()
     return {"ok": True, "mail_enabled": bool(SMTP_HOST)}
 
@@ -286,7 +289,7 @@ def reset_password(token: str, body: s.ResetIn, db: Session = Depends(get_db)):
     user.password_hash = hash_password(body.password)
     user.session_version = (user.session_version or 0) + 1
     r.used_at = datetime.utcnow()
-    events.log(db, "reset_done", user.email, user)
+    events.log(db, "reset_done", user.email, user, msg="email", email=user.email)
     db.commit()
     return _token_out(db, user)
 
@@ -300,7 +303,8 @@ def admin_reset_link(user_id: int, ctx: Ctx = Depends(require("members.manage"))
     if len(memberships_of(db, user_id)) > 1 and user_id != ctx.user.id:
         raise HTTPException(403, "This person is also in another group; they use \"Forgot password\" themselves")
     link = _new_reset(db, mem.user, ctx.user)
-    events.log(db, "reset_requested", f"{ctx.user.email} made a password link for {mem.user.email}", ctx.user, ctx.group.id)
+    events.log(db, "reset_requested", f"{ctx.user.email} made a password link for {mem.user.email}", ctx.user, ctx.group.id,
+               msg="reset_by_member", by=ctx.user.email, email=mem.user.email)
     db.commit()
     return {"link": link, "hours": RESET_HOURS}
 
@@ -352,7 +356,8 @@ def create_group(body: s.NewGroupIn, user: m.User = Depends(current_user), db: S
     They become its owner and the app switches to it."""
     _check_signup_code(db, body.code)
     g = new_group(db, body.name.strip(), user)
-    events.log(db, "family_created", f"{user.email} created {g.name}", user, g.id)
+    events.log(db, "family_created", f"{user.email} created {g.name}", user, g.id,
+               msg="family_created", email=user.email, family=g.name)
     db.commit()
     return s.GroupOut(id=g.id, name=g.name)
 
@@ -390,7 +395,8 @@ def create_user(body: s.UserCreate, ctx: Ctx = Depends(require("members.manage")
     mem = m.Membership(user_id=user.id, group_id=ctx.group.id, role_id=role.id)
     db.add(mem)
     events.log(db, "member_added", f"{ctx.user.email} added {user.email} to {ctx.group.name} as {role.name}",
-               ctx.user, ctx.group.id)
+               ctx.user, ctx.group.id, msg="member_added", by=ctx.user.email, email=user.email,
+               family=ctx.group.name, role=role.name)
     db.commit()
     db.refresh(mem)
     return _member_out(mem)
@@ -439,7 +445,8 @@ def delete_user(user_id: int, ctx: Ctx = Depends(require("members.manage")), db:
         t.assigned_to_id = None
     db.delete(mem)
     db.flush()
-    events.log(db, "member_removed", f"{ctx.user.email} removed {user.email} from {ctx.group.name}", ctx.user, ctx.group.id)
+    events.log(db, "member_removed", f"{ctx.user.email} removed {user.email} from {ctx.group.name}", ctx.user, ctx.group.id,
+               msg="member_removed", by=ctx.user.email, email=user.email, family=ctx.group.name)
     if not memberships_of(db, user.id):
         db.delete(user)
     elif user.current_group_id == ctx.group.id:
@@ -568,11 +575,14 @@ def create_invitation(body: s.InvitationIn, ctx: Ctx = Depends(require("members.
     out = _invite_out(inv)
     out.mailed, out.mail_error = send_invitation(inv, body.lang or ctx.user.lang)
     events.log(db, "invite_sent", f"{ctx.user.email} invited {email} to {ctx.group.name} as {role.name}"
-               + ("" if out.mailed else " (link copied, no e-mail)"), ctx.user, ctx.group.id)
+               + ("" if out.mailed else " (link copied, no e-mail)"), ctx.user, ctx.group.id,
+               msg="invite_sent", by=ctx.user.email, email=email, family=ctx.group.name, role=role.name,
+               copied=not out.mailed)
     if out.mailed:
-        events.log(db, "mail_sent", f"Invitation to {email}", ctx.user, ctx.group.id)
+        events.log(db, "mail_sent", f"Invitation to {email}", ctx.user, ctx.group.id, msg="mail_invite", email=email, error="")
     elif SMTP_HOST:
-        events.log(db, "mail_failed", f"Invitation to {email}: {out.mail_error}", ctx.user, ctx.group.id)
+        events.log(db, "mail_failed", f"Invitation to {email}: {out.mail_error}", ctx.user, ctx.group.id,
+                   msg="mail_invite", email=email, error=out.mail_error or "")
     db.commit()
     return out
 
@@ -617,7 +627,8 @@ def accept_invitation(token: str, body: s.AcceptIn, db: Session = Depends(get_db
         db.add(m.Membership(user_id=user.id, group_id=inv.group_id, role_id=inv.role_id))
     user.current_group_id = inv.group_id
     inv.accepted_at = datetime.utcnow()
-    events.log(db, "invite_accepted", f"{user.email} joined {inv.group.name} as {inv.role.name}", user, inv.group_id)
+    events.log(db, "invite_accepted", f"{user.email} joined {inv.group.name} as {inv.role.name}", user, inv.group_id,
+               msg="invite_accepted", email=user.email, family=inv.group.name, role=inv.role.name)
     db.commit()
     return _token_out(db, user)
 

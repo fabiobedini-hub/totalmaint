@@ -102,12 +102,15 @@ def run_once(db: Session, force: bool = False) -> list[dict]:
         summary.append({"user": user.email, "tasks": [t.title for t in tasks], "sent": sent, "error": error})
         if SMTP_HOST:
             events.log(db, "mail_sent" if sent else "mail_failed",
-                       f"Reminder to {user.email}: {len(tasks)} task(s)" + (f" – {error}" if error else ""), user)
+                       f"Reminder to {user.email}: {len(tasks)} task(s)" + (f" – {error}" if error else ""), user,
+                       msg="mail_reminder", email=user.email, n=len(tasks), error=error or "")
         if sent:  # only mark as reminded when the mail really went out, so a failure is retried
             for t in fresh:
                 t.last_reminded_on = today
-    events.log(db, "reminders", f"{sum(1 for x in summary if x['sent'])} of {len(summary)} reminder e-mail(s) sent"
-               + ("" if SMTP_HOST else " (no SMTP: only logged)"))
+    sent_n = sum(1 for x in summary if x["sent"])
+    events.log(db, "reminders", f"{sent_n} of {len(summary)} reminder e-mail(s) sent"
+               + ("" if SMTP_HOST else " (no SMTP: only logged)"),
+               msg="reminders_run", sent=sent_n, total=len(summary), nosmtp=not SMTP_HOST)
     db.commit()
     return summary
 

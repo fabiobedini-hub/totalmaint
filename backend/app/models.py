@@ -93,7 +93,10 @@ class Event(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
     kind: Mapped[str] = mapped_column(String(30), index=True)
-    text: Mapped[str] = mapped_column(String(300), default="")
+    text: Mapped[str] = mapped_column(String(300), default="")  # English, also for searching and older rows
+    # the same sentence as a key + values, so TotalMant Admin can show it in the viewer's language
+    msg: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    params: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON
     user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     group_id: Mapped[Optional[int]] = mapped_column(ForeignKey("groups.id", ondelete="SET NULL"), nullable=True)
 

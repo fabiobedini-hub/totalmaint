@@ -10,6 +10,8 @@ Run locally:   python -m uvicorn app.admin_main:app --port 8001   (from the back
 """
 import gzip
 import ipaddress
+import json
+from contextvars import ContextVar
 import os
 import platform
 import secrets
@@ -40,6 +42,56 @@ from .permissions import memberships_of
 from .reminders import send_mail
 
 COOKIE = "tm_admin"
+
+# ---------------------------------------------------------------- the console's own messages, in its 3 languages
+# The page sends X-Lang (en / no / it); the middleware puts it here for the request.
+_lang: ContextVar[str] = ContextVar("lang", default="en")
+MSG = {
+    "outside": ("TotalMant Admin only answers on the home network or Tailscale",
+                "TotalMant Admin svarer bare på hjemmenettet eller Tailscale",
+                "TotalMant Admin risponde solo dalla rete di casa o da Tailscale"),
+    "log_in": ("Log in", "Logg inn", "Accedi"),
+    "expired": ("Session expired, log in again", "Økten er utløpt, logg inn på nytt", "Sessione scaduta, accedi di nuovo"),
+    "pw_changed": ("The admin password has changed, log in again", "Admin-passordet er endret, logg inn på nytt",
+                   "La password admin è cambiata, accedi di nuovo"),
+    "not_set": ("Set ADMIN_PASSWORD (at least 10 characters) in .env and restart",
+                "Sett ADMIN_PASSWORD (minst 10 tegn) i .env og start på nytt",
+                "Imposta ADMIN_PASSWORD (almeno 10 caratteri) nel .env e riavvia"),
+    "locked": ("Too many wrong passwords: wait {m} minutes", "For mange feil passord: vent {m} minutter",
+               "Troppe password sbagliate: aspetta {m} minuti"),
+    "wrong_pw": ("Wrong password", "Feil passord", "Password sbagliata"),
+    "no_family": ("Family not found", "Fant ikke familien", "Famiglia non trovata"),
+    "no_account": ("Account not found", "Fant ikke kontoen", "Account non trovato"),
+    "no_invite": ("Invitation not found", "Fant ikke invitasjonen", "Invito non trovato"),
+    "only_owner": ("{name} is the only owner of {fam}, which has other members: they hand it over in the app first "
+                   "(Settings → Make owner), or delete the family",
+                   "{name} er eneste eier av {fam}, som har andre medlemmer: vedkommende må gi eierskapet videre i appen "
+                   "først (Innstillinger → Gjør til eier), eller slett familien",
+                   "{name} è l'unico proprietario di {fam}, che ha altri membri: prima deve cederla nell'app "
+                   "(Innstillinger → Gjør til eier), oppure elimina la famiglia"),
+    "code_short": ("The code needs at least 4 characters", "Koden må ha minst 4 tegn", "Il codice deve avere almeno 4 caratteri"),
+    "no_pg_dump": ("pg_dump is not installed in this container (rebuild it with the new Dockerfile)",
+                   "pg_dump er ikke installert i denne containeren (bygg den på nytt med den nye Dockerfile)",
+                   "pg_dump non è installato in questo container (ricostruiscilo con il nuovo Dockerfile)"),
+    "backup_failed": ("Backup failed: {e}", "Sikkerhetskopien feilet: {e}", "Backup fallito: {e}"),
+    "bad_name": ("Bad file name", "Ugyldig filnavn", "Nome file non valido"),
+    "no_backup": ("Backup not found", "Fant ikke sikkerhetskopien", "Backup non trovato"),
+    "no_smtp": ("SMTP_HOST is not set in .env, so e-mail is switched off",
+                "SMTP_HOST er ikke satt i .env, så e-post er slått av",
+                "SMTP_HOST non è impostato nel .env, quindi l'e-mail è spenta"),
+}
+_IDX = {"en": 0, "no": 1, "it": 2}
+
+
+def t(key: str, **kw) -> str:
+    return MSG[key][_IDX.get(_lang.get(), 0)].format(**kw)
+
+
+def _pick_lang(request: Request) -> str:
+    want = (request.headers.get("x-lang") or request.headers.get("accept-language") or "en").lower()
+    if want.startswith(("nb", "nn", "no")):
+        return "no"
+    return "it" if want.startswith("it") else "en"
 STARTED = datetime.now(timezone.utc)
 
 app = FastAPI(title="TotalMant Admin", version=APP_VERSION, docs_url=None, redoc_url=None, openapi_url=None)
@@ -70,9 +122,10 @@ def allowed_address(host: Optional[str]) -> bool:
 
 @app.middleware("http")
 async def home_network_only(request: Request, call_next):
+    _lang.set(_pick_lang(request))
     host = request.client.host if request.client else None
     if not allowed_address(host):
-        return JSONResponse({"detail": "TotalMant Admin only answers on the home network or Tailscale"}, 403)
+        return JSONResponse({"detail": t("outside")}, 403)
     response = await call_next(request)
     response.headers["Cache-Control"] = "no-store"
     response.headers["X-Frame-Options"] = "DENY"
@@ -100,13 +153,13 @@ def _session_token() -> str:
 def admin_session(request: Request) -> bool:
     token = request.cookies.get(COOKIE)
     if not token or not ADMIN_PASSWORD:
-        raise HTTPException(401, "Log in")
+        raise HTTPException(401, t("log_in"))
     try:
         data = jwt.decode(token, SECRET_KEY, algorithms=["HS256"], audience="tm-admin")
     except jwt.PyJWTError:
-        raise HTTPException(401, "Session expired, log in again")
+        raise HTTPException(401, t("expired"))
     if data.get("pw") != _password_fingerprint():
-        raise HTTPException(401, "The admin password has changed, log in again")
+        raise HTTPException(401, t("pw_changed"))
     return True
 
 
@@ -122,20 +175,20 @@ def status():
 @router.post("/login")
 def login(body: LoginIn, request: Request, response: Response, db: Session = Depends(get_db)):
     if len(ADMIN_PASSWORD) < 10:
-        raise HTTPException(503, "Set ADMIN_PASSWORD (at least 10 characters) in .env and restart")
+        raise HTTPException(503, t("not_set"))
     who = request.client.host if request.client else "?"
     now = time.time()
     recent = [t for t in _fails.get(who, []) if now - t < LOCK_MINUTES * 60]
     if len(recent) >= MAX_FAILS:
-        raise HTTPException(429, f"Too many wrong passwords: wait {LOCK_MINUTES} minutes")
+        raise HTTPException(429, t("locked", m=LOCK_MINUTES))
     if not secrets.compare_digest(body.password.encode(), ADMIN_PASSWORD.encode()):
         recent.append(now)
         _fails[who] = recent
-        events.log(db, "admin_login", f"Wrong admin password from {who}")
+        events.log(db, "admin_login", f"Wrong admin password from {who}", msg="admin_wrong_pw", who=who)
         db.commit()
-        raise HTTPException(401, "Wrong password")
+        raise HTTPException(401, t("wrong_pw"))
     _fails.pop(who, None)
-    events.log(db, "admin_login", f"Admin console log-in from {who}")
+    events.log(db, "admin_login", f"Admin console log-in from {who}", msg="admin_login", who=who)
     db.commit()
     response.set_cookie(COOKIE, _session_token(), httponly=True, samesite="strict",
                         secure=request.url.scheme == "https", max_age=ADMIN_SESSION_HOURS * 3600)
@@ -171,8 +224,13 @@ def _done(db: Session, start: date, end: date) -> int:
 
 
 def _event_out(e: m.Event, names: dict) -> dict:
+    try:
+        params = json.loads(e.params) if e.params else None
+    except ValueError:
+        params = None
     return {"id": e.id, "at": e.at.isoformat() + "Z", "kind": e.kind, "label": events.KINDS.get(e.kind, e.kind),
-            "text": e.text, "user_id": e.user_id, "group_id": e.group_id, "group_name": names.get(e.group_id)}
+            "text": e.text, "msg": e.msg, "params": params,
+            "user_id": e.user_id, "group_id": e.group_id, "group_name": names.get(e.group_id)}
 
 
 def _group_names(db: Session) -> dict:
@@ -296,7 +354,7 @@ def families(_: bool = Depends(admin_session), db: Session = Depends(get_db)):
 def family(group_id: int, _: bool = Depends(admin_session), db: Session = Depends(get_db)):
     g = db.get(m.Group, group_id)
     if g is None:
-        raise HTTPException(404, "Family not found")
+        raise HTTPException(404, t("no_family"))
     ids = select(m.Asset.id).where(m.Asset.group_id == g.id)
     logins = _last_login(db)
     kinds = dict(db.execute(select(m.Asset.kind, func.count(m.Asset.id)).where(m.Asset.group_id == g.id)
@@ -354,7 +412,7 @@ def delete_family(group_id: int, _: bool = Depends(admin_session), db: Session =
     family lose their account too (they could no longer use the app)."""
     g = db.get(m.Group, group_id)
     if g is None:
-        raise HTTPException(404, "Family not found")
+        raise HTTPException(404, t("no_family"))
     name, members = g.name, [x.user for x in g.memberships]
     purge_group(db, g)
     db.flush()
@@ -365,7 +423,8 @@ def delete_family(group_id: int, _: bool = Depends(admin_session), db: Session =
             db.delete(u)
         elif u.current_group_id == group_id:
             u.current_group_id = None
-    events.log(db, "admin", f"Deleted family {name}" + (f" and account(s) {', '.join(gone)}" if gone else ""))
+    events.log(db, "admin", f"Deleted family {name}" + (f" and account(s) {', '.join(gone)}" if gone else ""),
+               msg="adm_family_deleted", family=name, accounts=", ".join(gone))
     db.commit()
     return {"ok": True, "accounts_deleted": gone}
 
@@ -384,7 +443,7 @@ def users(_: bool = Depends(admin_session), db: Session = Depends(get_db)):
 def _user(db: Session, user_id: int) -> m.User:
     u = db.get(m.User, user_id)
     if u is None:
-        raise HTTPException(404, "Account not found")
+        raise HTTPException(404, t("no_account"))
     return u
 
 
@@ -393,7 +452,8 @@ def reset_link(user_id: int, _: bool = Depends(admin_session), db: Session = Dep
     """A one-time link to choose a new password, to hand over yourself (SMS, Messenger ...)."""
     u = _user(db, user_id)
     link = _new_reset(db, u)
-    events.log(db, "reset_requested", f"Admin console made a password link for {u.email}", u)
+    events.log(db, "reset_requested", f"Admin console made a password link for {u.email}", u,
+               msg="adm_reset", email=u.email)
     db.commit()
     return {"link": link, "hours": RESET_HOURS}
 
@@ -409,7 +469,8 @@ def block(user_id: int, body: BlockIn, _: bool = Depends(admin_session), db: Ses
     u.blocked = body.blocked
     if body.blocked:
         u.session_version = (u.session_version or 0) + 1  # end the sessions that are open now
-    events.log(db, "admin", f"{'Blocked' if body.blocked else 'Unblocked'} {u.email}", u)
+    events.log(db, "admin", f"{'Blocked' if body.blocked else 'Unblocked'} {u.email}", u,
+               msg="adm_blocked" if body.blocked else "adm_unblocked", email=u.email)
     db.commit()
     return {"ok": True, "blocked": u.blocked}
 
@@ -427,19 +488,19 @@ def delete_user(user_id: int, _: bool = Depends(admin_session), db: Session = De
         elif mem.role.key == "owner" and not any(x.role.key == "owner" for x in others):
             owned.append(mem.group.name)
     if owned:
-        raise HTTPException(400, f"{u.name} is the only owner of {', '.join(owned)}, which has other members: "
-                                 "they hand it over in the app first (Settings → Make owner), or delete the family")
+        raise HTTPException(400, t("only_owner", name=u.name, fam=", ".join(owned)))
     names = [g.name for g in alone]
     for g in alone:
         purge_group(db, g)
-    for t in db.scalars(select(m.Task).where(m.Task.assigned_to_id == u.id)):
-        t.assigned_to_id = None
+    for task in db.scalars(select(m.Task).where(m.Task.assigned_to_id == u.id)):
+        task.assigned_to_id = None
     for mem in memberships_of(db, u.id):
         db.delete(mem)
     db.flush()
     email = u.email
     db.delete(u)
-    events.log(db, "admin", f"Deleted account {email}" + (f" and family {', '.join(names)}" if names else ""))
+    events.log(db, "admin", f"Deleted account {email}" + (f" and family {', '.join(names)}" if names else ""),
+               msg="adm_user_deleted", email=email, families=", ".join(names))
     db.commit()
     return {"ok": True, "families_deleted": names}
 
@@ -465,8 +526,9 @@ def invitations(_: bool = Depends(admin_session), db: Session = Depends(get_db))
 def cancel_invitation(invitation_id: int, _: bool = Depends(admin_session), db: Session = Depends(get_db)):
     inv = db.get(m.Invitation, invitation_id)
     if inv is None:
-        raise HTTPException(404, "Invitation not found")
-    events.log(db, "admin", f"Cancelled the invitation for {inv.email} to {inv.group.name}", group_id=inv.group_id)
+        raise HTTPException(404, t("no_invite"))
+    events.log(db, "admin", f"Cancelled the invitation for {inv.email} to {inv.group.name}", group_id=inv.group_id,
+               msg="adm_invite_cancelled", email=inv.email, family=inv.group.name)
     db.delete(inv)
     db.commit()
     return {"ok": True}
@@ -490,7 +552,7 @@ class TestMailIn(BaseModel):
 def mail_test(body: TestMailIn, _: bool = Depends(admin_session), db: Session = Depends(get_db)):
     from email.message import EmailMessage
     if not SMTP_HOST:
-        return {"ok": False, "error": "SMTP_HOST is not set in .env, so e-mail is switched off"}
+        return {"ok": False, "error": t("no_smtp")}
     msg = EmailMessage()
     msg["Subject"] = "TotalMant Admin: test"
     msg["From"] = SMTP_FROM or SMTP_USER
@@ -498,11 +560,11 @@ def mail_test(body: TestMailIn, _: bool = Depends(admin_session), db: Session = 
     msg.set_content("E-mail from TotalMaint works.\n")
     try:
         send_mail(msg)
-        events.log(db, "mail_sent", f"Test e-mail to {body.to}")
+        events.log(db, "mail_sent", f"Test e-mail to {body.to}", msg="mail_test", to=body.to, error="")
         ok, err = True, None
     except Exception as exc:  # show the SMTP error as it is
         err = f"{type(exc).__name__}: {exc}"
-        events.log(db, "mail_failed", f"Test e-mail to {body.to}: {err}")
+        events.log(db, "mail_failed", f"Test e-mail to {body.to}: {err}", msg="mail_test", to=body.to, error=err)
         ok = False
     db.commit()
     return {"ok": ok, "error": err}
@@ -541,12 +603,13 @@ def set_signup(body: SignupIn, _: bool = Depends(admin_session), db: Session = D
     else:
         code = body.code.strip()
         if body.mode == "code" and len(code) < 4:
-            raise HTTPException(400, "The code needs at least 4 characters")
+            raise HTTPException(400, t("code_short"))
         _set(db, "signup_mode", body.mode)
         _set(db, "signup_code", code if body.mode == "code" else "")
     db.flush()
     mode, code = signup_settings(db)
-    events.log(db, "admin", f"Registration of new families: {mode}" + (" (with code)" if code else ""))
+    events.log(db, "admin", f"Registration of new families: {mode}" + (" (with code)" if code else ""),
+               msg="adm_signup", mode=mode)
     db.commit()
     return {"signup_mode": mode, "signup_code": code}
 
@@ -592,15 +655,16 @@ def backup_now(_: bool = Depends(admin_session), db: Session = Depends(get_db)):
             with gzip.open(target, "wb") as f:
                 f.write(proc.stdout)
     except FileNotFoundError:
-        raise HTTPException(500, "pg_dump is not installed in this container (rebuild it with the new Dockerfile)")
+        raise HTTPException(500, t("no_pg_dump"))
     except Exception as exc:
-        events.log(db, "backup", f"Backup FAILED: {exc}")
+        events.log(db, "backup", f"Backup FAILED: {exc}", msg="backup_failed", error=str(exc))
         db.commit()
-        raise HTTPException(500, f"Backup failed: {exc}")
+        raise HTTPException(500, t("backup_failed", e=exc))
     old = sorted((f for f in BACKUP_DIR.iterdir() if f.name.startswith("db-")), key=lambda f: f.stat().st_mtime)
     for f in old[:-30]:
         f.unlink(missing_ok=True)
-    events.log(db, "backup", f"Backup {target.name} ({target.stat().st_size // 1024} kB)")
+    events.log(db, "backup", f"Backup {target.name} ({target.stat().st_size // 1024} kB)",
+               msg="backup_done", name=target.name, kb=target.stat().st_size // 1024)
     db.commit()
     return {"ok": True, "name": target.name, "size": target.stat().st_size}
 
@@ -608,10 +672,10 @@ def backup_now(_: bool = Depends(admin_session), db: Session = Depends(get_db)):
 @router.get("/backups/{name}")
 def download_backup(name: str, _: bool = Depends(admin_session)):
     if "/" in name or "\\" in name or not name.startswith("db-"):
-        raise HTTPException(400, "Bad file name")
+        raise HTTPException(400, t("bad_name"))
     f = BACKUP_DIR / name
     if not f.is_file():
-        raise HTTPException(404, "Backup not found")
+        raise HTTPException(404, t("no_backup"))
     return FileResponse(f, filename=name, media_type="application/octet-stream")
 
 
