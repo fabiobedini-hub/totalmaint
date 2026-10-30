@@ -1,0 +1,30 @@
+# --- Mai su GitHub: dati, password, ambienti locali ---
+.env
+data/
+backup/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+secret.key
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Copie e archivi locali (restano solo sul PC)
+_backup_*/
+_archivio_flask/
+
+# Documenti privati
+*.docx
+*.xlsx
+*.pdf
+
+# Windows / editor
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
