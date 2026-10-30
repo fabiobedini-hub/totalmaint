@@ -64,6 +64,14 @@ svg.i { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none;
 .nav h6 { margin: 18px 10px 6px; font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); font-weight: 600; }
 .side .foot { margin-top: auto; padding: 10px; font-size: 12px; color: var(--ink-3); }
 .side .foot button { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font-weight: 600; }
+/* language switch: IT · EN · NO */
+.lang { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; margin-bottom: 10px; }
+.lang button, .side .foot .lang button { background: var(--surface); border: 0; border-left: 1px solid var(--line); padding: 4px 9px;
+  font: inherit; font-size: 11px; font-weight: 600; letter-spacing: .04em; color: var(--ink-2); cursor: pointer; }
+.lang button:first-child, .side .foot .lang button:first-child { border-left: 0; }
+.lang button.on, .side .foot .lang button.on { background: var(--accent-soft); color: var(--accent); }
+.lang button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.login .lang { display: flex; width: fit-content; margin: 14px 0 0; }
 
 .main { min-width: 0; padding: 0 22px 40px; }
 .top { display: flex; align-items: center; gap: 14px; height: 54px; border-bottom: 1px solid var(--line); margin: 0 -22px 18px; padding: 0 22px; background: var(--surface); position: sticky; top: 0; z-index: 5; }

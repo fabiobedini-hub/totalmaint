@@ -2,6 +2,10 @@
 
 Una riga per ogni modifica pubblicata. La più recente in alto.
 
+## 0.4.1 – 2026-10-30
+- **TotalMant Admin in tre lingue**: italiano, inglese e norvegese. Si sceglie con IT · EN · NO nella pagina di accesso e in fondo al menu; la scelta resta salvata nel browser. Al primo avvio segue la lingua del browser.
+- Anche i messaggi di errore del server (password sbagliata, sessione scaduta …) vengono mostrati nella lingua scelta. Il testo degli eventi nel registro resta quello salvato dal server (inglese).
+
 ## 0.4.0 – 2026-10-30
 - **TotalMant Admin**: console separata per chi gestisce il server, sulla porta 8081 (rete di casa e Tailscale), con password propria `ADMIN_PASSWORD`. Dashboard (oggi rispetto a ieri, il mese rispetto al mese scorso, ultime attività, azioni rapide), famiglie, utenti (link password, blocca/sblocca, elimina), inviti e registrazioni, registro e-mail ed e-mail di prova, registrazione aperta/con codice/chiusa senza riavviare, backup con un clic e download, tabelle del database, registro eventi.
 - **Adminer** sulla porta 8082 per vedere le tabelle a mano.
