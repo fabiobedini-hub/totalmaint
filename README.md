@@ -69,8 +69,10 @@ solved on the NAS with Tailscale or the reverse proxy (see below).
   each role may do under Settings → Roles and can add roles of their own. Owner always has
   everything. All checks are in `backend/app/permissions.py`.
 * **Invitations** by e-mail: a one-time link valid for `INVITE_DAYS` (14). Without SMTP the app
-  shows the link to copy. New people can only sign up and start their own group when
-  `SIGNUP_CODE` is set in `.env`.
+  shows the link to copy.
+* **Register a new family** from the log-in screen: the person names the family and becomes its
+  owner. `SIGNUP=closed` in `.env` switches this off (invitations only); `SIGNUP_CODE` makes it
+  need a code you hand out. Someone with an account adds another family under Settings → New family.
 * **Multiple users** with their own language (English / Norwegian) and "only my tasks".
 * **E-mail reminders** once a day (configure SMTP in `.env`; without it they are only logged).
 

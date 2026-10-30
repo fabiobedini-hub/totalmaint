@@ -430,15 +430,16 @@ function loggedIn(res) {
 // mode: "login" | "setup" (first user ever) | "signup" (new group, needs the sign-up code)
 async function renderAuth(mode) {
   const app = $("#app");
-  let status = { needs_setup: false, signup_enabled: false };
+  let status = { needs_setup: false, signup_enabled: false, signup_needs_code: false };
   try { status = await api("/api/auth/status"); } catch (e) { fail(e); }
   mode = status.needs_setup ? "setup" : mode === "signup" && status.signup_enabled ? "signup" : "login";
-  const newAccount = [{ name: "name", label: T("name"), required: true, autocomplete: "name" },
+  const newAccount = [{ name: "name", label: T("your_name"), required: true, autocomplete: "name" },
     { name: "email", label: T("email"), type: "email", required: true, autocomplete: "email" },
     { name: "password", label: T("password"), type: "password", required: true, autocomplete: "new-password" }];
-  const fields = mode === "setup" ? newAccount
-    : mode === "signup" ? [...newAccount, { name: "group_name", label: T("group_name"), required: true, placeholder: T("group_name_hint") },
-                           { name: "code", label: T("signup_code"), required: true }]
+  const familyField = { name: "group_name", label: T("group_name"), required: true, placeholder: T("group_name_hint") };
+  const fields = mode === "setup" ? [familyField, ...newAccount]
+    : mode === "signup" ? [familyField, ...newAccount,
+                           ...(status.signup_needs_code ? [{ name: "code", label: T("signup_code"), required: true }] : [])]
     : [{ name: "email", label: T("email"), type: "email", required: true, autocomplete: "username" },
        { name: "password", label: T("password"), type: "password", required: true, autocomplete: "current-password" }];
   const title = { setup: "setup_title", signup: "signup_title", login: "login_title" }[mode];
@@ -1559,8 +1560,9 @@ async function pageSettings(main) {
   state.user = await api("/api/me");
   const u = state.user;
   const manage = can("members.manage"), editRoles = can("roles.manage");
-  const [users, vendors, roles, invites] = await Promise.all([
+  const [users, vendors, roles, invites, signup] = await Promise.all([
     api("/api/users"), api("/api/vendors"), api("/api/roles"), manage ? api("/api/invitations") : Promise.resolve([]),
+    api("/api/auth/status").catch(() => ({})),
   ]);
   state.vendors = vendors;
   state.users = users;
@@ -1575,7 +1577,8 @@ async function pageSettings(main) {
       <button class="btn" id="logout">${esc(T("log_out"))}</button></div>
     <div class="two-col"><div>
       <div class="panel"><h3>${esc(T("profile"))}</h3><form id="pform">${formHtml(profileFields, u)}<button class="btn primary">${esc(T("save"))}</button></form></div>
-      <div class="panel">${head(u.group.name, manage ? `<button class="btn ghost small" id="renameGroup">${esc(T("rename"))}</button>` : "")}
+      <div class="panel">${head(u.group.name, (manage ? `<button class="btn ghost small" id="renameGroup">${esc(T("rename"))}</button>` : "")
+          + (signup.signup_enabled ? `<button class="btn ghost small" id="newGroup">${ICON.plus}${esc(T("new_family"))}</button>` : ""))}
         <p class="small muted" style="margin-top:-4px">${esc(T("your_role"))}: <b>${esc(u.role.name)}</b></p>
         ${u.groups.length > 1 ? `<label class="field"><span>${esc(T("active_group"))}</span><select id="groupSel">${u.groups.map((g) =>
           `<option value="${g.id}" ${g.id === u.group.id ? "selected" : ""}>${esc(g.name)} (${esc(g.role)})</option>`).join("")}</select></label>` : ""}
@@ -1624,6 +1627,18 @@ async function pageSettings(main) {
       shellRendered = false; render();
     } catch (err) { fail(err); }
   });
+  $("#newGroup")?.addEventListener("click", () => openForm({
+    title: T("new_family"),
+    fields: [{ name: "name", label: T("group_name"), required: true, placeholder: T("group_name_hint") },
+      ...(signup.signup_needs_code ? [{ name: "code", label: T("signup_code"), required: true }] : [])],
+    intro: `<p class="small muted">${esc(T("new_family_help"))}</p>`,
+    submitLabel: T("create_family"),
+    onSubmit: async (v) => {
+      await api("/api/groups", { method: "POST", body: v });
+      state.user = null; state.users = []; state.vendors = []; state.assetFilter = null; localStorage.removeItem("tm_asset");
+      shellRendered = false; toast(T("family_created", v.name)); location.hash = "#/assets"; render();
+    },
+  }));
   $("#renameGroup")?.addEventListener("click", () => openForm({
     title: T("rename"), fields: [{ name: "name", label: T("group_name"), required: true }], values: { name: u.group.name },
     onSubmit: async (v) => { await api("/api/group", { method: "PATCH", body: v }); state.user = null; shellRendered = false; toast(T("saved")); render(); },

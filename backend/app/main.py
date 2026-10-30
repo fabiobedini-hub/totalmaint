@@ -44,7 +44,7 @@ async def lifespan(_: FastAPI):
     task.cancel()
 
 
-app = FastAPI(title="TotalMaint", version="0.3.1", lifespan=lifespan)
+app = FastAPI(title="TotalMaint", version="0.3.2", lifespan=lifespan)
 app.include_router(api.router)
 app.include_router(reminders.router)
 app.include_router(ical.router)

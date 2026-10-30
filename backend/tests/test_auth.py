@@ -2,7 +2,7 @@
 
 
 def test_first_setup_then_closed(client):
-    assert client.get("/api/auth/status").json() == {"needs_setup": True, "signup_enabled": False}
+    assert client.get("/api/auth/status").json()["needs_setup"] is True
     r = client.post("/api/auth/setup", json={"name": "A", "email": "A@Test.no", "password": "secret123"})
     assert r.status_code == 200 and r.json()["user"]["is_admin"] is True
     assert client.get("/api/auth/status").json()["needs_setup"] is False

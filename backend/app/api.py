@@ -14,7 +14,8 @@ from sqlalchemy.orm import Session
 from . import models as m
 from . import schemas as s
 from .auth import create_token, current_user, hash_password, new_ical_token, verify_password
-from .config import INVITE_DAYS, MAX_UPLOAD_MB, PUBLIC_URL, RESET_HOURS, SIGNUP_CODE, SMTP_HOST, UPLOAD_DIR
+from .config import (INVITE_DAYS, MAX_UPLOAD_MB, PUBLIC_URL, RESET_HOURS, SIGNUP_CODE, SIGNUP_ENABLED, SMTP_HOST,
+                     UPLOAD_DIR)
 from .db import get_db
 from .recurrence import add_interval, next_counter_after_completion, next_due_after_completion
 from .services import (asset_total_cost, calendar_events, completion_out, part_out, task_out,
@@ -106,7 +107,14 @@ def _token_out(db: Session, user: m.User) -> s.TokenOut:
 @router.get("/auth/status")
 def auth_status(db: Session = Depends(get_db)):
     has_users = db.scalar(select(func.count(m.User.id))) > 0
-    return {"needs_setup": not has_users, "signup_enabled": bool(SIGNUP_CODE)}
+    return {"needs_setup": not has_users, "signup_enabled": SIGNUP_ENABLED, "signup_needs_code": bool(SIGNUP_CODE)}
+
+
+def _check_signup_code(code: str) -> None:
+    if not SIGNUP_ENABLED:
+        raise HTTPException(403, "Registering new families is switched off; ask for an invitation")
+    if SIGNUP_CODE and not secrets.compare_digest((code or "").strip(), SIGNUP_CODE):
+        raise HTTPException(403, "Wrong sign-up code")
 
 
 @router.post("/auth/setup", response_model=s.TokenOut)
@@ -126,14 +134,11 @@ def first_setup(body: s.SetupIn, db: Session = Depends(get_db)):
 
 @router.post("/auth/signup", response_model=s.TokenOut)
 def signup(body: s.SignupIn, db: Session = Depends(get_db)):
-    """A new person with the sign-up code: their own account and their own group, as owner."""
-    if not SIGNUP_CODE:
-        raise HTTPException(403, "Sign-up is closed; ask for an invitation")
-    if not secrets.compare_digest(body.code.strip(), SIGNUP_CODE):
-        raise HTTPException(403, "Wrong sign-up code")
+    """Register a new family: a new account and a new group with that name, the person as owner."""
+    _check_signup_code(body.code)
     email = body.email.lower().strip()
     if db.scalar(select(m.User).where(m.User.email == email)):
-        raise HTTPException(400, "E-mail already in use")
+        raise HTTPException(400, "This e-mail already has an account: log in and add the new family under Settings")
     user = m.User(name=body.name, email=email, lang=body.lang, password_hash=hash_password(body.password),
                   ical_token=new_ical_token())
     db.add(user)
@@ -307,6 +312,16 @@ def _legacy_role_id(db: Session, ctx: Ctx, body) -> Optional[int]:
 def _owner_count(db: Session, group_id: int) -> int:
     return db.scalar(select(func.count(m.Membership.id)).join(m.Role)
                      .where(m.Membership.group_id == group_id, m.Role.key == "owner")) or 0
+
+
+@router.post("/groups", response_model=s.GroupOut)
+def create_group(body: s.NewGroupIn, user: m.User = Depends(current_user), db: Session = Depends(get_db)):
+    """Someone who already has an account starts another family (a cabin with friends, a boat club ...).
+    They become its owner and the app switches to it."""
+    _check_signup_code(body.code)
+    g = new_group(db, body.name.strip(), user)
+    db.commit()
+    return s.GroupOut(id=g.id, name=g.name)
 
 
 @router.get("/group", response_model=s.GroupOut)

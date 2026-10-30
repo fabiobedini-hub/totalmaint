@@ -2,6 +2,11 @@
 
 Una riga per ogni modifica pubblicata. La più recente in alto.
 
+## 0.3.2 – 2026-10-30
+- **Registrer en ny familie** dalla pagina di login: nome della famiglia, nome, e-mail e password; chi registra diventa Eier. Aperto di default; `SIGNUP=closed` nel `.env` lo chiude, `SIGNUP_CODE` richiede un codice.
+- Anche il primo utente sceglie il nome della famiglia (prima era sempre "Family").
+- Innstillinger → **Ny familie**: chi ha già un account crea un'altra famiglia (hytta, båtforening …) e passa dall'una all'altra.
+
 ## 0.3.1 – 2026-10-30
 - **Glemt passord?** sulla pagina di login: si inserisce l'e-mail e arriva un link monouso (valido `RESET_HOURS`, 2 ore) per scegliere una nuova password. La risposta è la stessa anche se l'e-mail non esiste; massimo 3 e-mail all'ora per persona.
 - Dopo il reset tutti gli altri dispositivi vengono disconnessi.

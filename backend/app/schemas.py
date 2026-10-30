@@ -25,7 +25,7 @@ class SetupIn(BaseModel):
 
 class SignupIn(SetupIn):
     group_name: str = Field(min_length=1, max_length=100)
-    code: str
+    code: str = ""  # only needed when SIGNUP_CODE is set
 
 
 class LoginIn(BaseModel):
@@ -74,6 +74,10 @@ class GroupIn(BaseModel):
 
 class GroupOut(GroupIn):
     id: int
+
+
+class NewGroupIn(GroupIn):
+    code: str = ""  # only needed when SIGNUP_CODE is set
 
 
 class SwitchGroupIn(BaseModel):

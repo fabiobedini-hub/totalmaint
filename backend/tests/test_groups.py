@@ -127,13 +127,45 @@ def signup(client, monkeypatch, email, group):
     return Api(client, r.json()["token"])
 
 
-def test_signup_needs_the_code(api, client, monkeypatch):
-    body = {"name": "X", "email": "x@test.no", "password": "secret123", "group_name": "X", "code": ""}
-    assert client.post("/api/auth/signup", json=body).status_code == 403  # closed by default
+def test_register_new_family_is_open_by_default(api, client):
+    body = {"name": "Ola", "email": "ola@test.no", "password": "secret123", "group_name": "Familien Nordmann"}
+    assert client.get("/api/auth/status").json()["signup_enabled"] is True
+    r = client.post("/api/auth/signup", json=body)
+    assert r.status_code == 200, r.text
+    me = Api(client, r.json()["token"]).get("/api/me")
+    assert me["group"]["name"] == "Familien Nordmann" and me["is_owner"] is True
+    # the same e-mail can't register twice
+    r = client.post("/api/auth/signup", json={**body, "group_name": "Another"})
+    assert r.status_code == 400 and "log in" in r.json()["detail"]
+
+
+def test_signup_code_and_closed(api, client, monkeypatch):
     from app import api as api_module
+    body = {"name": "X", "email": "x@test.no", "password": "secret123", "group_name": "X"}
     monkeypatch.setattr(api_module, "SIGNUP_CODE", "letmein")
+    assert client.post("/api/auth/signup", json=body).status_code == 403
     assert client.post("/api/auth/signup", json={**body, "code": "wrong"}).status_code == 403
     assert client.post("/api/auth/signup", json={**body, "code": "letmein"}).status_code == 200
+    monkeypatch.setattr(api_module, "SIGNUP_ENABLED", False)
+    assert client.post("/api/auth/signup", json={**body, "email": "y@test.no", "code": "letmein"}).status_code == 403
+
+
+def test_setup_with_family_name(client):
+    r = client.post("/api/auth/setup", json={"name": "Fabio", "email": "f@test.no", "password": "secret123",
+                                              "group_name": "Familien Bedini"})
+    assert Api(client, r.json()["token"]).get("/api/me")["group"]["name"] == "Familien Bedini"
+
+
+def test_logged_in_user_starts_another_family(api, client, monkeypatch):
+    api.asset("House")
+    g = api.post("/api/groups", {"name": "Hytta"})
+    me = api.get("/api/me")
+    assert me["group"]["id"] == g["id"] and me["is_owner"] is True
+    assert sorted(x["name"] for x in me["groups"]) == ["Family", "Hytta"]
+    assert api.get("/api/assets") == []  # the new family starts empty
+    from app import api as api_module
+    monkeypatch.setattr(api_module, "SIGNUP_ENABLED", False)
+    api.post("/api/groups", {"name": "Båtforening"}, expect=403)
 
 
 def test_groups_cannot_see_each_other(api, client, monkeypatch):

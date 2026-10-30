@@ -58,8 +58,12 @@ REMINDER_HOUR = int(os.getenv("REMINDER_HOUR", "7"))  # local hour for the daily
 
 FRONTEND_DIR = Path(os.getenv("FRONTEND_DIR", PROJECT_DIR / "frontend"))
 
-# Groups: anyone with this code can sign up and create their own group (household, boat club ...).
-# Empty = sign-up is closed; people only get in through an invitation from a group admin.
+# Registering a new family (group) from the log-in screen; the person who registers becomes its owner.
+#   SIGNUP=open    anyone who can reach the app can register (default)
+#   SIGNUP=closed  nobody: new people only get in through an invitation
+#   SIGNUP_CODE=x  registering also needs this code (hand it out to the families you want)
+SIGNUP = os.getenv("SIGNUP", "open").strip().lower()
 SIGNUP_CODE = os.getenv("SIGNUP_CODE", "").strip()
+SIGNUP_ENABLED = SIGNUP != "closed"
 INVITE_DAYS = int(os.getenv("INVITE_DAYS", "14"))  # how long an invitation link works
 RESET_HOURS = int(os.getenv("RESET_HOURS", "2"))    # how long a "forgot password" link works

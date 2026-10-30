@@ -1,6 +1,6 @@
 // Service worker: makes the app installable and lets it open offline,
 // showing the data that was loaded last time.
-const VERSION = "tm-v15";
+const VERSION = "tm-v16";
 const SHELL = ["/", "/index.html", "/style.css", "/i18n.js", "/app.js", "/icon.svg", "/manifest.webmanifest"];
 
 self.addEventListener("install", (e) => {
