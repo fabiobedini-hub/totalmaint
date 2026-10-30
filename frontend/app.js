@@ -125,6 +125,8 @@ const ICON = {
   file: svg('<path d="M14 3H6.5A1.5 1.5 0 0 0 5 4.5v15A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5V8z"/><path d="M14 3v5h5"/>'),
   template: svg('<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 9h8M8 13h8M8 17h5"/>'),
   x: svg('<path d="M6 6l12 12M18 6 6 18"/>'),
+  eye: svg('<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>'),
+  eyeOff: svg('<path d="M3 3l18 18"/><path d="M10.6 5.1A10.7 10.7 0 0 1 12 5c6.4 0 10 7 10 7a17.6 17.6 0 0 1-3.2 4.1M6.6 6.6C3.8 8.4 2 12 2 12s3.6 7 10 7c1.9 0 3.5-.6 4.9-1.4"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/>'),
   print: svg('<path d="M7 9V3.5h10V9"/><rect x="3.5" y="9" width="17" height="8" rx="1.5"/><path d="M7 14.5h10V20.5H7z"/>'),
 };
 const kindIcon = (k) => ICON[k] || ICON.other;
@@ -147,6 +149,20 @@ function modal({ title, html, footer = "", onMount }) {
   return back;
 }
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
+// Show / hide password: the eye button next to every password field
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-pw]");
+  if (!b) return;
+  e.preventDefault();
+  const input = b.parentElement.querySelector("input");
+  const show = input.type === "password";
+  input.type = show ? "text" : "password";
+  b.innerHTML = show ? ICON.eyeOff : ICON.eye;
+  b.setAttribute("aria-pressed", String(show));
+  const label = T(show ? "hide_password" : "show_password");
+  b.setAttribute("aria-label", label); b.title = label;
+  input.focus();
+});
 
 function fieldHtml(f, value) {
   const v = value ?? f.default ?? "";
@@ -163,6 +179,10 @@ function fieldHtml(f, value) {
   else {
     const extra = f.type === "number" ? `step="${f.step || "any"}" inputmode="decimal"` : "";
     input = `<input type="${f.type || "text"}" id="${id}" name="${f.name}" value="${esc(v)}" ${f.required ? "required" : ""} ${extra} ${f.autocomplete ? `autocomplete="${f.autocomplete}"` : ""}>`;
+    if (f.type === "password") {
+      input = `<span class="pw-wrap">${input}<button type="button" class="pw-toggle" data-pw aria-pressed="false"
+        aria-label="${esc(T("show_password"))}" title="${esc(T("show_password"))}">${ICON.eye}</button></span>`;
+    }
   }
   return `<label class="field" for="${id}"><span>${esc(f.label)}</span>${input}</label>`;
 }

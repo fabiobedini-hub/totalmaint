@@ -2,6 +2,9 @@
 
 Una riga per ogni modifica pubblicata. La più recente in alto.
 
+## 0.2.2 – 2026-10-30
+- Password fields (settings, users, login) have an eye button to show / hide the password.
+
 ## 0.2.1 – 2026-10-30
 - Innstillinger: titolo cambiato in "Generelle innstillinger" (EN: "General settings").
 
