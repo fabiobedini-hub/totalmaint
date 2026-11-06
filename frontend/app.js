@@ -192,9 +192,6 @@ function fieldHtml(f, value) {
   if (f.type === "checkbox") {
     return `<label class="check"><input type="checkbox" id="${id}" name="${f.name}" ${v ? "checked" : ""}><span>${esc(f.label)}</span></label>`;
   }
-  if (f.type === "date") {
-    return `<label class="field" for="${id}_t"><span>${esc(f.label)}</span>${dateInputHtml({ id, name: f.name, value: v, required: f.required })}</label>`;
-  }
   let input;
   if (f.type === "textarea") input = `<textarea id="${id}" name="${f.name}">${esc(v)}</textarea>`;
   else if (f.type === "select") {
@@ -211,57 +208,6 @@ function fieldHtml(f, value) {
   }
   return `<label class="field" for="${id}"><span>${esc(f.label)}</span>${input}</label>`;
 }
-
-// Dates are always shown and typed as DD.MM.YYYY. The browser's own date field follows the browser language
-// (e.g. MM/DD/YYYY in an English Chrome), so it stays hidden: it keeps the ISO value under the field's id/name,
-// so everything that reads `.value` gets 2026-11-06 as before, and the calendar button opens its picker.
-const isoToDmy = (iso) => (/^\d{4}-\d{2}-\d{2}$/.test(iso || "") ? `${iso.slice(8, 10)}.${iso.slice(5, 7)}.${iso.slice(0, 4)}` : "");
-function dmyToIso(s) {
-  s = (s || "").trim();
-  if (!s) return "";
-  const m = s.match(/^(\d{1,2})[./\- ](\d{1,2})[./\- ](\d{4}|\d{2})$/) || s.match(/^(\d{2})(\d{2})(\d{4}|\d{2})$/);
-  if (!m) return null;
-  let [d, mo, y] = m.slice(1).map(Number);
-  if (y < 100) y += 2000;
-  const dt = new Date(y, mo - 1, d);
-  if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) return null;
-  return `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-}
-function dateInputHtml({ id, name, value, required }) {
-  return `<span class="date-wrap"><input type="text" class="date-text" id="${id}_t" inputmode="numeric" autocomplete="off"
-      maxlength="10" value="${esc(isoToDmy(value))}" placeholder="${esc(T("date_ph"))}" ${required ? "required" : ""}>`
-    + `<input type="date" class="date-native" id="${id}" ${name ? `name="${name}"` : ""} value="${esc(value || "")}" tabindex="-1" aria-hidden="true">`
-    + `<button type="button" class="date-btn" data-date-pick aria-label="${esc(T("pick_date"))}" title="${esc(T("pick_date"))}">${ICON.calendar}</button></span>`;
-}
-function setDateValue(id, iso) {
-  const n = document.getElementById(id);
-  n.value = iso;
-  const t = n.parentElement.querySelector(".date-text");
-  t.value = isoToDmy(iso); t.classList.remove("invalid");
-}
-document.addEventListener("input", (e) => {
-  const t = e.target.closest?.(".date-text");
-  if (!t) return;
-  const iso = dmyToIso(t.value);
-  t.parentElement.querySelector(".date-native").value = iso || "";
-  if (iso !== null) t.classList.remove("invalid");
-});
-document.addEventListener("change", (e) => {
-  const el = e.target;
-  if (el.classList?.contains("date-native")) setDateValue(el.id, el.value);
-  else if (el.classList?.contains("date-text")) {
-    const iso = dmyToIso(el.value);
-    el.classList.toggle("invalid", iso === null);
-    if (iso) el.value = isoToDmy(iso);  // 6.11.26 -> 06.11.2026
-  }
-});
-document.addEventListener("click", (e) => {
-  const b = e.target.closest("[data-date-pick]");
-  if (!b) return;
-  e.preventDefault();
-  const n = b.parentElement.querySelector(".date-native");
-  try { n.showPicker(); } catch { n.focus(); n.click(); }
-});
 
 function formHtml(fields, values = {}) {
   let out = "", i = 0;
@@ -323,19 +269,12 @@ function openForm({ title, fields, values = {}, submitLabel = T("save"), onSubmi
     const dirty = (on) => { okBtn.disabled = !on; resetBtn.disabled = !on; back.classList.toggle("dirty", on); };
     form.addEventListener("input", () => dirty(true));
     form.addEventListener("change", () => dirty(true));
-    resetBtn.addEventListener("click", () => { form.reset(); $$(".date-text", form).forEach((t) => t.classList.remove("invalid")); form.dispatchEvent(new Event("reset-done")); dirty(false); });
+    resetBtn.addEventListener("click", () => { form.reset(); form.dispatchEvent(new Event("reset-done")); dirty(false); });
   }
   const submit = async (e) => {
     e?.preventDefault();
-    const badDate = $$(".date-text", form).find((t) => dmyToIso(t.value) === null);
-    if (badDate) { badDate.classList.add("invalid"); toast(T("date_invalid"), true); badDate.focus(); return; }
     const missing = fields.find((f) => f.required && !form.querySelector(`[name="${f.name}"]`).value.trim());
-    if (missing) {
-      toast(`${missing.label}?`, true);
-      const el = form.querySelector(`[name="${missing.name}"]`);
-      (el.classList.contains("date-native") ? el.parentElement.querySelector(".date-text") : el).focus();
-      return;
-    }
+    if (missing) { toast(`${missing.label}?`, true); form.querySelector(`[name="${missing.name}"]`).focus(); return; }
     const btn = $("[data-ok]", back);
     btn.disabled = true;
     try { await onSubmit(readForm(form, fields)); closeModal(); }
@@ -1498,8 +1437,8 @@ async function pagePrint(main) {
     <div class="panel print-filters no-print">
       <label class="field"><span>${esc(T("nav_assets"))}</span><select id="pAsset"><option value="">${esc(T("all_things"))}</option>
         ${assets.map((a) => `<option value="${a.id}" ${a.id === p.asset ? "selected" : ""}>${esc(a.name)}</option>`).join("")}</select></label>
-      <label class="field" for="pFrom_t"><span>${esc(T("from_date"))}</span>${dateInputHtml({ id: "pFrom", value: p.from })}</label>
-      <label class="field" for="pTo_t"><span>${esc(T("to_date"))}</span>${dateInputHtml({ id: "pTo", value: p.to })}</label>
+      <label class="field"><span>${esc(T("from_date"))}</span><input type="date" id="pFrom" value="${p.from}"></label>
+      <label class="field"><span>${esc(T("to_date"))}</span><input type="date" id="pTo" value="${p.to}"></label>
       <div class="pf-checks">
         <label class="check"><input type="checkbox" id="pOverdue" ${p.overdue ? "checked" : ""}><span>${esc(T("include_overdue"))}</span></label>
         <label class="check"><input type="checkbox" id="pRepeats" ${p.repeats ? "checked" : ""}><span>${esc(T("include_repeats"))}</span></label>
@@ -1520,7 +1459,7 @@ async function pagePrint(main) {
   const redraw = () => { read(); printSheet($("#sheet"), assets).catch(fail); };
   $$(".print-filters select, .print-filters input", main).forEach((el) => el.onchange = redraw);
   $$("[data-months]", main).forEach((b) => b.onclick = () => {
-    setDateValue("pFrom", todayIso()); setDateValue("pTo", addMonths(todayIso(), Number(b.dataset.months))); redraw();
+    $("#pFrom").value = todayIso(); $("#pTo").value = addMonths(todayIso(), Number(b.dataset.months)); redraw();
   });
   $("#doPrint").onclick = () => window.print();
   await printSheet($("#sheet"), assets);
