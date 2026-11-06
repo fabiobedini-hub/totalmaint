@@ -4,7 +4,7 @@ from datetime import date
 import pytest
 
 from app.schemas import AssetKind
-from app.templates_data import TEMPLATES, TASK_TITLES_IT
+from app.templates_data import TEMPLATES, TASK_DESCRIPTIONS, TASK_TITLES_IT
 
 KINDS = list(AssetKind.__args__)
 
@@ -42,6 +42,31 @@ def test_template_tasks_are_well_formed():
                 if season:
                     month, day = map(int, season[0].split("-"))
                     date(2026, month, day)  # a real date
+
+
+def test_descriptions_are_complete():
+    all_titles = {task[0] for bundles in TEMPLATES.values() for b in bundles for task in b["tasks"]}
+    keys = [b["key"] for bundles in TEMPLATES.values() for b in bundles]
+    assert len(keys) == len(set(keys)), "template keys must be unique"
+    for title, d in TASK_DESCRIPTIONS.items():
+        assert title in all_titles, ("description for an unknown task", title)
+        assert d["en"] and d["no"] and d["it"], title
+
+
+def test_description_saved_in_users_language(api):
+    api.patch("/api/me", {"lang": "no"})
+    a = api.asset("Huset", "home")
+    api.post(f"/api/assets/{a['id']}/apply-template?key=radon&start=2026-06-01", {})
+    task = api.get(f"/api/assets/{a['id']}")["tasks"][0]
+    assert task["title"] == "Mål radon (langtidsmåling, vinter)"
+    assert "oktober og april" in task["description"]
+    assert task["next_due"] == "2026-10-15"
+
+
+def test_crawl_space_also_for_cabins(api):
+    a = api.asset("Hytta", "cabin")
+    res = api.post(f"/api/assets/{a['id']}/apply-template?key=cabin_crawl_space", {})
+    assert res["tasks_created"] == 4
 
 
 def test_applying_twice_does_not_duplicate(api):

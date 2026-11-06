@@ -2,6 +2,12 @@
 
 Una riga per ogni modifica pubblicata. La più recente in alto.
 
+## 0.5.1 – 2026-11-06
+- **Nuovi modelli per la casa**: Controllo esterno della casa (pluviali e ghiaccioli, rivestimento, muffa nera, lavaggio facciata, drenaggio, topi), Vespaio (ispezione primavera/autunno, prese d'aria aperte d'inverno e chiuse d'estate), Radon (ogni 5 anni, ottobre–aprile), Interni – acqua ed elettricità (tubi di lavatrice e lavastoviglie, rubinetto generale prima delle vacanze, prese e interruttori), Camino e stufa a legna.
+- **Casa – base**: "Controlla il tetto" diventa due controlli, primaverile (20/4) e autunnale (15/9); nuovo "Pulisci gli scarichi del tetto e del balcone". Le attività già create non cambiano.
+- Pompa di calore: nuovo controllo invernale del ghiaccio sotto l'unità esterna. Vespaio disponibile anche per la baita.
+- Le attività dei modelli hanno ora una **descrizione** con cosa controllare, in norvegese, inglese e italiano (intervalli secondo i consigli di Huseierne e DSA).
+
 ## 0.5.0 – 2026-10-30
 - **TotalMaint in italiano**: oltre a norvegese e inglese. Si sceglie con Norsk · English · Italiano nella pagina di accesso, oppure in Impostazioni → Lingua. Al primo avvio segue la lingua del browser.
 - In italiano anche le **e-mail** (promemoria, inviti, password dimenticata, e-mail di prova), il nome del calendario abbonato e la scritta "Fine garanzia".

@@ -25,7 +25,7 @@ from .services import (asset_total_cost, calendar_events, completion_out, part_o
 from .permissions import (ALL, PERMISSIONS, Ctx, clean, group_asset_ids, group_ctx, memberships_of, new_group,
                           require)
 from .reminders import send_invitation, send_password_reset
-from .templates_data import find_template, list_templates, task_title
+from .templates_data import find_template, list_templates, task_description, task_title
 
 router = APIRouter(prefix="/api")
 
@@ -1248,7 +1248,8 @@ def apply_template(asset_id: int, key: str = Query(...), start: Optional[date] =
         if title.lower() in existing_tasks:
             continue
         db.add(m.Task(
-            asset_id=asset.id, title=title, interval_value=value, interval_unit=unit,
+            asset_id=asset.id, title=title, description=task_description(task, lang),
+            interval_value=value, interval_unit=unit,
             component_id=comp_by_key[ckey].id if ckey else None,
             next_due=due, remind_days_before=14 if season else 7 if unit in ("months", "years") else 1,
             created_by_id=user.id,
