@@ -2,6 +2,9 @@
 
 Una riga per ogni modifica pubblicata. La più recente in alto.
 
+## 0.5.2 – 2026-11-06
+- **Date sempre come GG.MM.AAAA** (es. 06.11.2026), qualunque sia la lingua del browser: prima il campo data seguiva Chrome e in inglese mostrava MM/GG/AAAA. Si può scrivere la data (anche 6.11.26 o 06112026) oppure sceglierla dal calendario con il bottone accanto. Una data impossibile (31.02) viene segnalata in rosso e non si salva.
+
 ## 0.5.1 – 2026-11-06
 - **Nuovi modelli per la casa**: Controllo esterno della casa (pluviali e ghiaccioli, rivestimento, muffa nera, lavaggio facciata, drenaggio, topi), Vespaio (ispezione primavera/autunno, prese d'aria aperte d'inverno e chiuse d'estate), Radon (ogni 5 anni, ottobre–aprile), Interni – acqua ed elettricità (tubi di lavatrice e lavastoviglie, rubinetto generale prima delle vacanze, prese e interruttori), Camino e stufa a legna.
 - **Casa – base**: "Controlla il tetto" diventa due controlli, primaverile (20/4) e autunnale (15/9); nuovo "Pulisci gli scarichi del tetto e del balcone". Le attività già create non cambiano.
