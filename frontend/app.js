@@ -149,6 +149,7 @@ const ICON = {
   x: svg('<path d="M6 6l12 12M18 6 6 18"/>'),
   eye: svg('<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>'),
   eyeOff: svg('<path d="M3 3l18 18"/><path d="M10.6 5.1A10.7 10.7 0 0 1 12 5c6.4 0 10 7 10 7a17.6 17.6 0 0 1-3.2 4.1M6.6 6.6C3.8 8.4 2 12 2 12s3.6 7 10 7c1.9 0 3.5-.6 4.9-1.4"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/>'),
+  back: svg('<path d="M15 5l-7 7 7 7"/>'),
   print: svg('<path d="M7 9V3.5h10V9"/><rect x="3.5" y="9" width="17" height="8" rx="1.5"/><path d="M7 14.5h10V20.5H7z"/>'),
 };
 const kindIcon = (k) => ICON[k] || ICON.other;
@@ -170,7 +171,26 @@ function modal({ title, html, footer = "", onMount }) {
   onMount?.(back);
   return back;
 }
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
+// Back: the arrow link at the top of a page, or Esc. Goes to the page you came from when that was inside
+// TotalMaint, otherwise one level up (task -> its thing). Asks first if the page form has unsaved changes.
+let navSeq = history.state?.tm || 0;
+function stampNav() { if (!history.state?.tm) history.replaceState({ ...(history.state || {}), tm: ++navSeq }, ""); }
+function goBack() {
+  const crumb = $("#main .crumb[data-back]");
+  if ($("#main .dirty") && !confirm(T("leave_unsaved"))) return;
+  if ((history.state?.tm || 0) > 1) history.back();
+  else if (crumb) location.hash = crumb.getAttribute("href");
+}
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || e.isComposing) return;
+  if ($(".modal-back")) { closeModal(); return; }
+  if ($("#main .crumb[data-back]")) { e.preventDefault(); goBack(); }
+});
+document.addEventListener("click", (e) => {
+  const a = e.target.closest("[data-back]");
+  if (!a || e.ctrlKey || e.metaKey || e.shiftKey || e.button) return;
+  e.preventDefault(); goBack();
+});
 // Show / hide password: the eye button next to every password field
 document.addEventListener("click", (e) => {
   const b = e.target.closest("[data-pw]");
@@ -639,6 +659,7 @@ async function render() {
     try { state.user = await api("/api/me"); setLang(state.user.lang); } catch (e) { return; }
   }
   if (!shellRendered) renderShell();
+  stampNav();
   markNav();
   const main = $("#main");
   const [, route, id] = (location.hash || "#/").split("?")[0].split("/");
@@ -1124,7 +1145,7 @@ async function pageAsset(main, id) {
     ["parts", T("parts"), a.parts.length], ["warranties", T("warranties"), a.warranties.length], ["files", T("files"), a.attachments.length]];
   if (!tabs.some(([k]) => k === state.assetTab)) state.assetTab = "tasks";
   main.innerHTML = `
-    <a class="crumb" href="#/assets">${esc(T("things_title"))}</a>
+    <a class="crumb" data-back href="#/assets">${ICON.back}${esc(T("things_title"))}</a>
     <div class="page-head"><span class="kind-icon">${kindIcon(a.kind)}</span>
       <div class="grow"><h1>${esc(a.name)}</h1><div class="sub">${esc(T(`kind_${a.kind}`))}${a.location ? `, ${esc(a.location)}` : ""}${a.total_cost ? `. ${esc(T("total_cost"))}: ${esc(money(a.total_cost))}` : ""}</div></div>
       <div class="actions"><button class="btn" id="tpl" data-perm="templates.apply">${ICON.template}${esc(T("use_template"))}</button><button class="btn" id="printBtn">${ICON.print}${esc(T("print"))}</button><button class="btn" id="edit" data-perm="assets.edit">${esc(T("edit"))}</button></div></div>
@@ -1198,7 +1219,7 @@ async function pageTask(main, id) {
   const t = await api(`/api/tasks/${id}`);
   const s = stamp(t.next_due);
   main.innerHTML = `
-    <a class="crumb" href="#/asset/${t.asset_id}">${esc(t.asset_name)}</a>
+    <a class="crumb" data-back href="#/asset/${t.asset_id}">${ICON.back}${esc(t.asset_name)}</a>
     <div class="task-hero ${t.status}">
       <div class="big-date">${s.d}<small>${esc(s.m)}</small></div>
       <div><h1>${esc(t.title)}</h1>
@@ -1329,7 +1350,7 @@ async function pageVendor(main, id) {
     v.rate_notes ? [T("rate_notes"), esc(v.rate_notes)] : null,
   ].filter(Boolean);
   main.innerHTML = `
-    <a class="crumb" href="#/settings">${esc(T("vendors"))}</a>
+    <a class="crumb" data-back href="#/settings">${ICON.back}${esc(T("vendors"))}</a>
     <div class="page-head"><div class="grow"><h1>${esc(v.company)}</h1><div class="sub">${esc(v.trade || "")}${v.trade && contact ? " · " : ""}${contact}</div></div>
       <div class="actions"><button class="btn" id="editV" data-perm="vendors.manage">${esc(T("edit"))}</button></div></div>
     <div class="vstats">

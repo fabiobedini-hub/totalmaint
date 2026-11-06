@@ -120,7 +120,11 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .page-head { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; margin-bottom: 24px; }
 .page-head .grow { flex: 1; min-width: 200px; }
 .page-head .sub { color: var(--ink-3); margin-top: 4px; }
-.crumb { font-size: .875rem; margin-bottom: 6px; display: inline-block; text-decoration: none; }
+.crumb { font-size: .875rem; margin: 0 0 6px -6px; padding: 4px 10px 4px 4px; display: inline-flex; align-items: center; gap: 4px;
+  text-decoration: none; border-radius: var(--radius-s); }
+.crumb:hover { background: var(--fjord-soft); }
+.crumb:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--fjord-soft); }
+.crumb svg { width: 16px; height: 16px; flex: none; }
 
 /* ---------- buttons & inputs ---------- */
 .btn {

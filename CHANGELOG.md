@@ -2,6 +2,11 @@
 
 Una riga per ogni modifica pubblicata. La più recente in alto.
 
+## 0.5.2 – 2026-11-06
+- **Tornare indietro**: in alto nella pagina di un'attività, di un oggetto o di un fornitore c'è ora una freccia (‹ Polar). Anche il tasto **Esc** torna indietro.
+- Si torna alla pagina da cui si era arrivati (Panoramica, Calendario, l'oggetto …). Se la pagina è stata aperta direttamente da un link o da un'e-mail, si sale di un livello (attività → oggetto → Oggetti).
+- Se ci sono modifiche non salvate, chiede prima conferma. Con una finestra aperta, Esc chiude solo la finestra.
+
 ## 0.5.1 – 2026-11-06
 - **Nuovi modelli per la casa**: Controllo esterno della casa (pluviali e ghiaccioli, rivestimento, muffa nera, lavaggio facciata, drenaggio, topi), Vespaio (ispezione primavera/autunno, prese d'aria aperte d'inverno e chiuse d'estate), Radon (ogni 5 anni, ottobre–aprile), Interni – acqua ed elettricità (tubi di lavatrice e lavastoviglie, rubinetto generale prima delle vacanze, prese e interruttori), Camino e stufa a legna.
 - **Casa – base**: "Controlla il tetto" diventa due controlli, primaverile (20/4) e autunnale (15/9); nuovo "Pulisci gli scarichi del tetto e del balcone". Le attività già create non cambiano.
